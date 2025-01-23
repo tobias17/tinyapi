@@ -1,0 +1,6 @@
+{
+   "editor.tabSize": 3,
+   "mypy-type-checker.args": [],
+   "python.analysis.extraPaths": ["./tinygrad"],
+   "python.envFile": "${workspaceFolder}/.vscode/.env",
+}
