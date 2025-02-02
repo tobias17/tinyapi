@@ -7,7 +7,7 @@ from extra.models.llama import Transformer, convert_from_huggingface, fix_bf16
 
 from typing import Dict, Tuple, Set, List, Optional
 from transformers import AutoTokenizer
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import sys
 
 @dataclass
@@ -18,6 +18,7 @@ class ModelInst:
    num_weights: int
    index_filename: str = "model.safetensors.index.json"
    chunk_filename: str = "model-{i:05d}-of-{num_weights:05d}.safetensors"
+   extra_filenames: List[str] = field(default_factory=lambda: ["tokenizer.json", "tokenizer_config.json"])
 
 @dataclass
 class ModelArch:
@@ -42,6 +43,7 @@ MODELS: Dict[str,ModelArch] = {
             weights_subdir="deepseek_r1_qwen_32b",
             num_weights=8,
             chunk_filename="model-{i:05d}-of-{num_weights:06d}.safetensors", # WHY????
+            # Prompt template: https://unsloth.ai/blog/deepseekr1-dynamic
          ),
       }
    ),
@@ -103,12 +105,16 @@ def shard_across(state_dict:Dict[str,Tensor], devices:Tuple[str,...]) -> None:
       w.replace(w.shard(devices, axis=get_axis(k)).cast(TARGET_DTYPE))
 
 
-def load_model(inst:ModelInst, device_mem:Dict[str,int]) -> Transformer:
+def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -> Tuple[Transformer,AutoTokenizer]:
    index_filename = "model.safetensors.index.json"
    model_path = fetch(f"{inst.weights_url}/{inst.index_filename}?download=true", index_filename, subdir=inst.weights_subdir)
    for i in range(1, inst.num_weights+1):
       filename = inst.chunk_filename.format(i=i, num_weights=inst.num_weights)
       fetch(f"{inst.weights_url}/{filename}?download=true", filename, subdir=inst.weights_subdir)
+
+   for filename in inst.extra_filenames:
+      fetch(f"{inst.weights_url}/{filename}?download=true", filename, subdir=inst.weights_subdir)
+   tokenizer = AutoTokenizer.from_pretrained(str(model_path.parent))
 
    model = Transformer(**inst.params, linear=nn.Linear)
    updated_layers = []
@@ -124,14 +130,16 @@ def load_model(inst:ModelInst, device_mem:Dict[str,int]) -> Transformer:
    shard_across(get_state_dict(model), tuple(device_mem.keys()))
 
    weights = fix_bf16(convert_from_huggingface(load(str(model_path)), model, inst.params["n_heads"], inst.params["n_kv_heads"], permute_layers=False))
-   load_state_dict(model, weights, strict=False, consume=True)
-   return model
+   if not skip_load:
+      load_state_dict(model, weights, strict=False, consume=True)
 
-TEMPERATURE = 0.95
-TOP_K = 0
-TOP_P = 0.0
-ALPHA_F = 0.0
-ALPHA_P = 0.0
+   return model, tokenizer
+
+TEMPERATURE = 0.3
+TOP_K = 20
+TOP_P = 0.3
+ALPHA_F = 0.3
+ALPHA_P = 0.3
 
 last_seen_toks = []
 def prefill(model, toks, device, start_pos=0):
@@ -170,6 +178,7 @@ if __name__ == "__main__":
    parser.add_argument("--temperature", type=float, default=0.7, help="Temperature in the softmax")
    parser.add_argument("--prompt", type=str, default="Q: What is the distance from the earth to the moon?\nA: ", help="Phrase to start with")
    parser.add_argument("--timing", action="store_true", help="Print timing per token")
+   parser.add_argument("--skip-load", action="store_true")
    
    args = parser.parse_args()
 
@@ -180,26 +189,38 @@ if __name__ == "__main__":
       for i in range(args.dev_offset, args.dev_offset + args.gpus):
          device_mem[f"{Device.DEFAULT}:{i}"] = args.vram_limit*(1024**3)
       devices = tuple(device_mem.keys())
-      model = load_model(inst, device_mem)
+      model, tokenizer = load_model(inst, device_mem, args.skip_load)
 
-      tokenizer = AutoTokenizer.from_pretrained(arch.tokenizer)
       param_bytes = sum(x.lazydata.size * x.dtype.itemsize for x in get_parameters(model))
 
-   im_start, im_end = tokenizer.encode("<|im_start|>"), tokenizer.encode("<|im_end|>")
-   assert len(im_start) == 1 and len(im_end) == 1, f"{len(im_start)} and {len(im_end)}"
+   def encode(content:str):
+      return tokenizer.encode(content.strip(), add_special_tokens=False)
 
-   def encode_role(role: str):
-      return tokenizer.encode(role) + tokenizer.encode("\n\n")
-   def encode_message(role: str, content: str):
-      return im_start + encode_role(role) + tokenizer.encode(content.strip()) + im_end
+   user_role = "<｜User｜>"
+   assistant_role = "<｜Assistant｜>"
+   thinking_tag = "<think>"
+   bos_text = tokenizer.special_tokens_map["bos_token"]
+   eos_text = tokenizer.special_tokens_map["eos_token"]
+   eos_token = encode(eos_text)
 
-   prompt = encode_message("system", "You are an helpful assistant.")
+   # for text in [user_role, assistant_role, thinking_tag, "Test", "Hello, world!"]:
+   #    print(f"{text}: {encode(text)}")
 
+   prompt = encode(f"{bos_text}You are an helpful assistant.")
+
+   assert not args.skip_load
    start_pos = prefill(model, prompt, devices)
    while True:
-      toks = encode_message("user", input("Q: ")) + encode_role("assistant")
+      prompt = "Q: "
+      # user_input = input(prompt).strip()
+      # print()
+      user_input = "What is the distance between the earth and the moon?"
+      print(prompt + user_input)
+      extra_bits = assistant_role
+      toks = encode(user_role + prompt + user_input + extra_bits)
 
       start_pos = prefill(model, toks[:-1], devices, start_pos=start_pos)
+      print(extra_bits)
       last_tok = toks[-1]
       count = 0
       while True:
@@ -216,6 +237,7 @@ if __name__ == "__main__":
          start_pos += 1
          last_tok = tok
          count += 1
-         if tok == im_end or count >= 256: break
+         if tok in eos_token or count >= 1024: break
          print(tokenizer.decode([tok]), end="", flush=True)
       print(flush=True)
+      break
