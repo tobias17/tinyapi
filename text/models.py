@@ -3,16 +3,15 @@ from tinygrad.helpers import fetch, colored, GlobalCounters, Timing, DEBUG, tqdm
 from tinygrad.nn.state import get_state_dict, load_state_dict, get_parameters
 from examples.llama3 import load
 
-from extra.models.llama import Transformer, convert_from_huggingface, fix_bf16
+from extra.models.llama import Transformer, ModelConfig, convert_from_huggingface, fix_bf16
 
 from typing import Dict, Tuple, Set, List, Optional
 from transformers import AutoTokenizer
 from dataclasses import dataclass, field
-import sys
 
 @dataclass
 class ModelInst:
-   params: Dict
+   config: ModelConfig
    weights_url: str
    weights_subdir: str
    num_weights: int
@@ -20,32 +19,28 @@ class ModelInst:
    chunk_filename: str = "model-{i:05d}-of-{num_weights:05d}.safetensors"
    extra_filenames: List[str] = field(default_factory=lambda: ["tokenizer.json", "tokenizer_config.json"])
 
-@dataclass
-class ModelArch:
-   tokenizer: str
-   instances: Dict[str,ModelInst]
-
 
 TARGET_DTYPE = dtypes.float16
-MODELS: Dict[str,ModelArch] = {
-   "Qwen": ModelArch(
-      tokenizer="Qwen/QwQ-32B-Preview",
-      instances={
-         "32B": ModelInst(
-            params={"dim":5120, "n_heads":40, "n_kv_heads":8, "n_layers":64, "norm_eps":1e-5, "rope_theta":1000000, "vocab_size":152064, "hidden_dim":27648},
-            weights_url="https://huggingface.co/Qwen/QwQ-32B-Preview/resolve/main",
-            weights_subdir="qwq_32b_preview",
-            num_weights=17,
-         ),
-         "R1-32B": ModelInst(
-            params={"dim":5120, "n_heads":40, "n_kv_heads":8, "n_layers":64, "norm_eps":1e-5, "rope_theta":1000000, "vocab_size":152064, "hidden_dim":27648},
-            weights_url="https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B/resolve/main",
-            weights_subdir="deepseek_r1_qwen_32b",
-            num_weights=8,
-            chunk_filename="model-{i:05d}-of-{num_weights:06d}.safetensors", # WHY????
-            # Prompt template: https://unsloth.ai/blog/deepseekr1-dynamic
-         ),
-      }
+MODELS: Dict[str,ModelInst] = {
+   # "Qwen-32B": ModelInst(
+   #    params={"dim":5120, "n_heads":40, "n_kv_heads":8, "n_layers":64, "norm_eps":1e-5, "rope_theta":1000000, "vocab_size":152064, "hidden_dim":27648},
+   #    weights_url="https://huggingface.co/Qwen/QwQ-32B-Preview/resolve/main",
+   #    weights_subdir="qwq_32b_preview",
+   #    num_weights=17,
+   # ),
+   # "Qwen-R1-32B": ModelInst(
+   #    params={"dim":5120, "n_heads":40, "n_kv_heads":8, "n_layers":64, "norm_eps":1e-5, "rope_theta":1000000, "vocab_size":152064, "hidden_dim":27648},
+   #    weights_url="https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B/resolve/main",
+   #    weights_subdir="deepseek_r1_qwen_32b",
+   #    num_weights=8,
+   #    chunk_filename="model-{i:05d}-of-{num_weights:06d}.safetensors", # WHY????
+   #    # Prompt template: https://unsloth.ai/blog/deepseekr1-dynamic
+   # ),
+   "Mistral-24B": ModelInst(
+      config=ModelConfig(dim=5120, hidden_dim=32768, n_layers=40, n_heads=32, head_dim=128, n_kv_heads=8, norm_eps=1e-5, vocab_size=131072, rope_theta=100000000.0, max_context=32768),
+      weights_url="https://huggingface.co/mistralai/Mistral-Small-24B-Instruct-2501/resolve/main",
+      weights_subdir="mistral_small_24b_instruct",
+      num_weights=10,
    ),
 }
 
@@ -116,20 +111,20 @@ def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -
       fetch(f"{inst.weights_url}/{filename}?download=true", filename, subdir=inst.weights_subdir)
    tokenizer = AutoTokenizer.from_pretrained(str(model_path.parent))
 
-   model = Transformer(**inst.params, linear=nn.Linear)
-   updated_layers = []
-   for layer in model.layers:
-      head_dim = inst.params["dim"] // inst.params["n_heads"]
-      layer.attention.wq = nn.Linear(inst.params["dim"], inst.params["n_heads"]    * head_dim, bias=True)
-      layer.attention.wk = nn.Linear(inst.params["dim"], inst.params["n_kv_heads"] * head_dim, bias=True)
-      layer.attention.wv = nn.Linear(inst.params["dim"], inst.params["n_kv_heads"] * head_dim, bias=True)
-      updated_layers.append(layer)
-   model.layers = updated_layers
+   model = Transformer(inst.config)
+   # updated_layers = []
+   # for layer in model.layers:
+   #    head_dim = inst.params["dim"] // inst.params["n_heads"]
+   #    layer.attention.wq = nn.Linear(inst.params["dim"], inst.params["n_heads"]    * head_dim, bias=True)
+   #    layer.attention.wk = nn.Linear(inst.params["dim"], inst.params["n_kv_heads"] * head_dim, bias=True)
+   #    layer.attention.wv = nn.Linear(inst.params["dim"], inst.params["n_kv_heads"] * head_dim, bias=True)
+   #    updated_layers.append(layer)
+   # model.layers = updated_layers
 
    # split_into_blocks(get_state_dict(model), inst.params["n_layers"])
    shard_across(get_state_dict(model), tuple(device_mem.keys()))
 
-   weights = fix_bf16(convert_from_huggingface(load(str(model_path)), model, inst.params["n_heads"], inst.params["n_kv_heads"], permute_layers=False))
+   weights = fix_bf16(convert_from_huggingface(load(str(model_path)), model, inst.config.n_heads, inst.config.n_kv_heads, permute_layers=False))
    if not skip_load:
       load_state_dict(model, weights, strict=False, consume=True)
 
@@ -138,8 +133,8 @@ def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -
 TEMPERATURE = 0.3
 TOP_K = 20
 TOP_P = 0.3
-ALPHA_F = 0.3
-ALPHA_P = 0.3
+ALPHA_F = 0.6
+ALPHA_P = 0.6
 
 last_seen_toks = []
 def prefill(model, toks, device, start_pos=0):
@@ -165,11 +160,7 @@ def prefill(model, toks, device, start_pos=0):
 if __name__ == "__main__":
    import argparse
    parser = argparse.ArgumentParser("Performs a test load and generation of the specified model")
-   model_options: Dict[str,Tuple[ModelArch,ModelInst]] = {}
-   for arch_name, arch_val in MODELS.items():
-      for inst_name, inst_val in arch_val.instances.items():
-         model_options[f"{arch_name}-{inst_name}"] = (arch_val,inst_val)
-   parser.add_argument('model', choices=list(model_options.keys()), help="Which model to load and test")
+   parser.add_argument('model', choices=list(MODELS.keys()), help="Which model to load and test")
    parser.add_argument('--gpus', type=int, default=4, help="Number of GPUs allowed to be used")
    parser.add_argument('--dev-offset', type=int, default=1, help="Skips the first N devices to load the weights")
    parser.add_argument('--vram-limit', type=int, default=16, help="Amount of VRAM in GB per GPU to load weights")
@@ -184,7 +175,7 @@ if __name__ == "__main__":
 
    # Load model
    with Context(BEAM=0):
-      arch, inst = model_options[args.model]
+      inst = MODELS[args.model]
       device_mem: Dict[str,int] = {}
       for i in range(args.dev_offset, args.dev_offset + args.gpus):
          device_mem[f"{Device.DEFAULT}:{i}"] = args.vram_limit*(1024**3)
@@ -196,12 +187,19 @@ if __name__ == "__main__":
    def encode(content:str):
       return tokenizer.encode(content.strip(), add_special_tokens=False)
 
+   MAX_THINK  = 256
+   MAX_TOKENS = 512
+
    user_role = "<｜User｜>"
    assistant_role = "<｜Assistant｜>"
-   thinking_tag = "<think>"
+   start_thinking_tag = "<think>"
+   end_thinking_tag = "</think>"
+   end_thinking_token = encode(end_thinking_tag)
    bos_text = tokenizer.special_tokens_map["bos_token"]
    eos_text = tokenizer.special_tokens_map["eos_token"]
    eos_token = encode(eos_text)
+
+   assert len(end_thinking_token) == 1, f"end_thinking_token: {end_thinking_token}"
 
    # for text in [user_role, assistant_role, thinking_tag, "Test", "Hello, world!"]:
    #    print(f"{text}: {encode(text)}")
@@ -216,13 +214,14 @@ if __name__ == "__main__":
       # print()
       user_input = "What is the distance between the earth and the moon?"
       print(prompt + user_input)
-      extra_bits = assistant_role
+      extra_bits = assistant_role + start_thinking_tag
       toks = encode(user_role + prompt + user_input + extra_bits)
 
       start_pos = prefill(model, toks[:-1], devices, start_pos=start_pos)
       print(extra_bits)
       last_tok = toks[-1]
       count = 0
+      is_thinking = True
       while True:
          GlobalCounters.reset()
          if args.timing: print("")
@@ -235,9 +234,15 @@ if __name__ == "__main__":
                tok = model(Tensor([[last_tok]], device=devices), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P)
          tok = tok.item()
          start_pos += 1
-         last_tok = tok
          count += 1
-         if tok in eos_token or count >= 1024: break
+         if not is_thinking and tok in end_thinking_token:
+            is_thinking = False
+         elif is_thinking and count > MAX_THINK:
+            tok = end_thinking_token[0]
+            is_thinking = False
+         last_tok = tok
+         if tok in eos_token or count >= MAX_TOKENS:
+            break
          print(tokenizer.decode([tok]), end="", flush=True)
       print(flush=True)
       break
