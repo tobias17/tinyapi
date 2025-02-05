@@ -187,19 +187,17 @@ if __name__ == "__main__":
    def encode(content:str):
       return tokenizer.encode(content.strip(), add_special_tokens=False)
 
-   MAX_THINK  = 256
-   MAX_TOKENS = 512
+   MAX_TOKENS = 256
 
-   user_role = "<｜User｜>"
-   assistant_role = "<｜Assistant｜>"
-   start_thinking_tag = "<think>"
-   end_thinking_tag = "</think>"
-   end_thinking_token = encode(end_thinking_tag)
-   bos_text = tokenizer.special_tokens_map["bos_token"]
-   eos_text = tokenizer.special_tokens_map["eos_token"]
-   eos_token = encode(eos_text)
+   user_start_token = encode(user_start_text := "[INST]")
+   user_end_token   = encode(user_end_text   := "[/INST]")
+   bos_token = encode(bos_text := tokenizer.special_tokens_map["bos_token"])
+   eos_token = encode(eos_text := tokenizer.special_tokens_map["eos_token"])
 
-   assert len(end_thinking_token) == 1, f"end_thinking_token: {end_thinking_token}"
+   print(f"{user_start_text=}, {user_start_token=}")
+   print(f"{user_end_text=}, {user_end_token=}")
+   print(f"{bos_text=}, {bos_token=}")
+   print(f"{eos_text=}, {eos_token=}")
 
    # for text in [user_role, assistant_role, thinking_tag, "Test", "Hello, world!"]:
    #    print(f"{text}: {encode(text)}")
@@ -213,12 +211,10 @@ if __name__ == "__main__":
       # user_input = input(prompt).strip()
       # print()
       user_input = "What is the distance between the earth and the moon?"
-      print(prompt + user_input)
-      extra_bits = assistant_role + start_thinking_tag
-      toks = encode(user_role + prompt + user_input + extra_bits)
+      print(user_input)
+      toks = encode(user_start_text + prompt + user_input + user_end_text)
 
       start_pos = prefill(model, toks[:-1], devices, start_pos=start_pos)
-      print(extra_bits)
       last_tok = toks[-1]
       count = 0
       is_thinking = True
@@ -235,11 +231,6 @@ if __name__ == "__main__":
          tok = tok.item()
          start_pos += 1
          count += 1
-         if not is_thinking and tok in end_thinking_token:
-            is_thinking = False
-         elif is_thinking and count > MAX_THINK:
-            tok = end_thinking_token[0]
-            is_thinking = False
          last_tok = tok
          if tok in eos_token or count >= MAX_TOKENS:
             break
