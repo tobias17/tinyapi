@@ -3,7 +3,7 @@ from tinygrad.helpers import fetch, colored, GlobalCounters, Timing, DEBUG, tqdm
 from tinygrad.nn.state import get_state_dict, load_state_dict, get_parameters
 from examples.llama3 import load
 
-from extra.models.llama import Transformer, ModelConfig, convert_from_huggingface, fix_bf16, SampleParams
+from extra.models.llama import Transformer, ModelConfig, convert_from_huggingface, fix_bf16, TokenSampler
 
 from typing import Dict, Tuple, Set, List, Optional
 from transformers import AutoTokenizer
@@ -144,7 +144,7 @@ def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -
 
    return model, tokenizer
 
-SAMPLE_PARAMS = SampleParams(
+SAMPLER = TokenSampler(
    temperature=0.4,
    top_k=30,
    top_p=0.3,
@@ -236,7 +236,7 @@ if __name__ == "__main__":
                      (f", {GlobalCounters.global_mem*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s, param {param_bytes*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s" if DEBUG>=2 else "")) if DEBUG else None, enabled=args.timing):
 
                # tok = model(Tensor([[last_tok]], device=devices), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P)
-               tok = model(toks, devices, SAMPLE_PARAMS)
+               tok = model(toks, devices, SAMPLER)
          toks.append(tok)
          # start_pos += 1
          count += 1
