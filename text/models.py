@@ -8,6 +8,7 @@ from extra.models.llama import Transformer, ModelConfig, convert_from_huggingfac
 from typing import Dict, Tuple, Set, List, Optional
 from transformers import AutoTokenizer
 from dataclasses import dataclass, field
+import datetime
 
 @dataclass
 class ModelInst:
@@ -100,6 +101,20 @@ def shard_across(state_dict:Dict[str,Tensor], devices:Tuple[str,...]) -> None:
       w.replace(w.shard(devices, axis=get_axis(k)).cast(TARGET_DTYPE))
 
 
+def diff_state_dict_keys(model_set:Set[str], disk_set:Set[str]) -> None:
+   only_model = model_set.difference(disk_set)
+   only_disk  = disk_set .difference(model_set)
+
+   if len(only_model) > 0:
+      print("\nONLY MODEL:\n" + "\n".join(only_model))
+   if len(only_disk) > 0:
+      print("\nONLY DISK:\n" + "\n".join(only_disk))
+   if len(only_model) > 0 or len(only_disk) > 0:
+      print()
+   else:
+      print("\nFULL MATCH\n")
+
+
 def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -> Tuple[Transformer,AutoTokenizer]:
    index_filename = "model.safetensors.index.json"
    model_path = fetch(f"{inst.weights_url}/{inst.index_filename}?download=true", index_filename, subdir=inst.weights_subdir)
@@ -125,16 +140,17 @@ def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -
    shard_across(get_state_dict(model), tuple(device_mem.keys()))
 
    weights = fix_bf16(convert_from_huggingface(load(str(model_path)), model, inst.config.n_heads, inst.config.n_kv_heads, permute_layers=False))
+   diff_state_dict_keys(set(get_state_dict(weights).keys()), set(weights.keys()))
    if not skip_load:
       load_state_dict(model, weights, strict=False, consume=True)
 
    return model, tokenizer
 
-TEMPERATURE = 0.3
-TOP_K = 20
+TEMPERATURE = 0.4
+TOP_K = 30
 TOP_P = 0.3
-ALPHA_F = 0.6
-ALPHA_P = 0.6
+ALPHA_F = 2.0
+ALPHA_P = 2.0
 
 last_seen_toks = []
 def prefill(model, toks, device, start_pos=0):
@@ -150,6 +166,7 @@ def prefill(model, toks, device, start_pos=0):
       toks = toks[i:]
 
    # prefill the model
+   print(f"START POS: {start_pos}")
    for tok in tqdm(toks):
       GlobalCounters.reset()
       model(Tensor([[tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P).realize()
@@ -159,7 +176,7 @@ def prefill(model, toks, device, start_pos=0):
 
 if __name__ == "__main__":
    import argparse
-   parser = argparse.ArgumentParser("Performs a test load and generation of the specified model")
+   parser = argparse.ArgumentParser("ModelTest", description="Performs a test load and generation of the specified model")
    parser.add_argument('model', choices=list(MODELS.keys()), help="Which model to load and test")
    parser.add_argument('--gpus', type=int, default=4, help="Number of GPUs allowed to be used")
    parser.add_argument('--dev-offset', type=int, default=1, help="Skips the first N devices to load the weights")
@@ -185,7 +202,7 @@ if __name__ == "__main__":
       param_bytes = sum(x.lazydata.size * x.dtype.itemsize for x in get_parameters(model))
 
    def encode(content:str):
-      return tokenizer.encode(content.strip(), add_special_tokens=False)
+      return tokenizer.encode(content, add_special_tokens=False)
 
    MAX_TOKENS = 256
 
@@ -202,7 +219,21 @@ if __name__ == "__main__":
    # for text in [user_role, assistant_role, thinking_tag, "Test", "Hello, world!"]:
    #    print(f"{text}: {encode(text)}")
 
-   prompt = encode(f"{bos_text}You are an helpful assistant.")
+   SYSTEM_PROMPT = "You are an helpful assistant."
+#    today = datetime.date.today()
+#    yesterday = today - datetime.timedelta(days=1)
+#    SYSTEM_PROMPT = """You are {name}, a Large Language Model (LLM) created by Mistral AI, a French startup headquartered in Paris.
+
+# Your knowledge base was last updated on 2023-10-01.
+# The current date is {today}.
+
+# When you're not sure about some information, you say that you don't have the information and don't make up anything.
+# If the user's question is not clear, ambiguous, or does not provide enough context for you to accurately answer the question, you do not try to answer it right away and you rather ask the user to clarify their request (e.g. "What are some good restaurants around me?" => "Where are you?" or "When is the next flight to Tokyo" => "Where do you travel from?").
+# You are always very attentive to dates, in particular you try to resolve dates (e.g. "yesterday" is {yesterday}) and when asked about information at specific dates, you discard information that is at another date.
+# You follow these instructions in all languages, and always respond to the user in the language they use or request.""".format(name="Mistral24B", today=today.strftime("%Y-%m-%d"), yesterday=yesterday.strftime("%Y-%m-%d"))
+
+   prompt = encode(full_system_prompt := f"{bos_text}{SYSTEM_PROMPT}\n\n")
+   print(full_system_prompt)
 
    assert not args.skip_load
    start_pos = prefill(model, prompt, devices)
