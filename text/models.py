@@ -8,7 +8,13 @@ from extra.models.llama import Transformer, ModelConfig, convert_from_huggingfac
 from typing import Dict, Tuple, Set, List, Optional
 from transformers import AutoTokenizer
 from dataclasses import dataclass, field
-import datetime
+
+
+@dataclass
+class Prompt:
+   system_message: str
+   user_message: str
+   assistant_message: str
 
 @dataclass
 class ModelInst:
@@ -16,10 +22,10 @@ class ModelInst:
    weights_url: str
    weights_subdir: str
    num_weights: int
+   prompt: Prompt
    index_filename: str = "model.safetensors.index.json"
    chunk_filename: str = "model-{i:05d}-of-{num_weights:05d}.safetensors"
    extra_filenames: List[str] = field(default_factory=lambda: ["tokenizer.json", "tokenizer_config.json"])
-
 
 TARGET_DTYPE = dtypes.float16
 MODELS: Dict[str,ModelInst] = {
@@ -42,6 +48,7 @@ MODELS: Dict[str,ModelInst] = {
       weights_url="https://huggingface.co/mistralai/Mistral-Small-24B-Instruct-2501/resolve/main",
       weights_subdir="mistral_small_24b_instruct",
       num_weights=10,
+      prompt=Prompt("<s>{0}\n\n", "[INST] {0} [/INST]", "{0}"),
    ),
 }
 
@@ -145,11 +152,11 @@ def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -
    return model, tokenizer
 
 SAMPLER = TokenSampler(
-   temperature=0.4,
+   temperature=0.3,
    top_k=30,
    top_p=0.3,
    alpha_f=0.3,
-   alpha_p=0.3
+   alpha_p=0.3,
 )
 
 if __name__ == "__main__":
@@ -164,7 +171,7 @@ if __name__ == "__main__":
    parser.add_argument("--prompt", type=str, default="Q: What is the distance from the earth to the moon?\nA: ", help="Phrase to start with")
    parser.add_argument("--timing", action="store_true", help="Print timing per token")
    parser.add_argument("--skip-load", action="store_true")
-   
+
    args = parser.parse_args()
 
    # Load model
@@ -185,31 +192,12 @@ if __name__ == "__main__":
 
    user_start_token = encode(user_start_text := "[INST]")
    user_end_token   = encode(user_end_text   := "[/INST]")
-   bos_token = encode(bos_text := tokenizer.special_tokens_map["bos_token"])
+   # bos_token = encode(bos_text := tokenizer.special_tokens_map["bos_token"])
    eos_token = encode(eos_text := tokenizer.special_tokens_map["eos_token"])
 
-   print(f"{user_start_text=}, {user_start_token=}")
-   print(f"{user_end_text=}, {user_end_token=}")
-   print(f"{bos_text=}, {bos_token=}")
-   print(f"{eos_text=}, {eos_token=}")
+   SYSTEM_PROMPT = "You are an helpful assistant. Answer questions directly. Keep responses short and simple."
 
-   # for text in [user_role, assistant_role, thinking_tag, "Test", "Hello, world!"]:
-   #    print(f"{text}: {encode(text)}")
-
-   SYSTEM_PROMPT = "You are an helpful assistant."
-#    today = datetime.date.today()
-#    yesterday = today - datetime.timedelta(days=1)
-#    SYSTEM_PROMPT = """You are {name}, a Large Language Model (LLM) created by Mistral AI, a French startup headquartered in Paris.
-
-# Your knowledge base was last updated on 2023-10-01.
-# The current date is {today}.
-
-# When you're not sure about some information, you say that you don't have the information and don't make up anything.
-# If the user's question is not clear, ambiguous, or does not provide enough context for you to accurately answer the question, you do not try to answer it right away and you rather ask the user to clarify their request (e.g. "What are some good restaurants around me?" => "Where are you?" or "When is the next flight to Tokyo" => "Where do you travel from?").
-# You are always very attentive to dates, in particular you try to resolve dates (e.g. "yesterday" is {yesterday}) and when asked about information at specific dates, you discard information that is at another date.
-# You follow these instructions in all languages, and always respond to the user in the language they use or request.""".format(name="Mistral24B", today=today.strftime("%Y-%m-%d"), yesterday=yesterday.strftime("%Y-%m-%d"))
-
-   sys_prompt = encode(full_system_prompt := f"{bos_text}{SYSTEM_PROMPT}\n\n")
+   sys_prompt = encode(full_system_prompt := inst.prompt.system_message.format(SYSTEM_PROMPT))
    print(full_system_prompt[:-1])
 
    assert not args.skip_load
@@ -218,9 +206,9 @@ if __name__ == "__main__":
       prompt = "Q: "
       # user_input = input(prompt).strip()
       # print()
-      user_input = "What is the distance between the earth and the moon?"
+      user_input = inst.prompt.user_message.format("What is the distance between the earth and the moon?")
       print(user_input)
-      toks = sys_prompt + encode(user_start_text + user_input + user_end_text)
+      toks = sys_prompt + encode(user_input)
 
       # start_pos = prefill(model, toks[:-1], devices, start_pos=start_pos)
       last_tok = toks[-1]
