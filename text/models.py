@@ -3,7 +3,7 @@ from tinygrad.helpers import fetch, colored, GlobalCounters, Timing, DEBUG, tqdm
 from tinygrad.nn.state import get_state_dict, load_state_dict, get_parameters
 from examples.llama3 import load
 
-from extra.models.llama import Transformer, ModelConfig, convert_from_huggingface, fix_bf16
+from extra.models.llama import Transformer, ModelConfig, convert_from_huggingface, fix_bf16, SampleParams
 
 from typing import Dict, Tuple, Set, List, Optional
 from transformers import AutoTokenizer
@@ -111,8 +111,6 @@ def diff_state_dict_keys(model_set:Set[str], disk_set:Set[str]) -> None:
       print("\nONLY DISK:\n" + "\n".join(only_disk))
    if len(only_model) > 0 or len(only_disk) > 0:
       print()
-   else:
-      print("\nFULL MATCH\n")
 
 
 def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -> Tuple[Transformer,AutoTokenizer]:
@@ -146,33 +144,13 @@ def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -
 
    return model, tokenizer
 
-TEMPERATURE = 0.4
-TOP_K = 30
-TOP_P = 0.3
-ALPHA_F = 2.0
-ALPHA_P = 2.0
-
-last_seen_toks = []
-def prefill(model, toks, device, start_pos=0):
-   global last_seen_toks
-
-   # we can skip part of the prompt if it is the same as last and start_pos=0
-   if start_pos == 0:
-      for i, (a, b) in enumerate(zip(toks, last_seen_toks)):
-         if a != b: break
-      else: i = min(len(toks), len(last_seen_toks))
-      start_pos += i
-      last_seen_toks = toks
-      toks = toks[i:]
-
-   # prefill the model
-   print(f"START POS: {start_pos}")
-   for tok in tqdm(toks):
-      GlobalCounters.reset()
-      model(Tensor([[tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P).realize()
-      start_pos += 1
-   return start_pos
-
+SAMPLE_PARAMS = SampleParams(
+   temperature=0.4,
+   top_k=30,
+   top_p=0.3,
+   alpha_f=0.3,
+   alpha_p=0.3
+)
 
 if __name__ == "__main__":
    import argparse
@@ -183,7 +161,6 @@ if __name__ == "__main__":
    parser.add_argument('--vram-limit', type=int, default=16, help="Amount of VRAM in GB per GPU to load weights")
 
    parser.add_argument("--count", type=int, default=30, help="Max number of tokens to generate")
-   parser.add_argument("--temperature", type=float, default=0.7, help="Temperature in the softmax")
    parser.add_argument("--prompt", type=str, default="Q: What is the distance from the earth to the moon?\nA: ", help="Phrase to start with")
    parser.add_argument("--timing", action="store_true", help="Print timing per token")
    parser.add_argument("--skip-load", action="store_true")
@@ -232,20 +209,20 @@ if __name__ == "__main__":
 # You are always very attentive to dates, in particular you try to resolve dates (e.g. "yesterday" is {yesterday}) and when asked about information at specific dates, you discard information that is at another date.
 # You follow these instructions in all languages, and always respond to the user in the language they use or request.""".format(name="Mistral24B", today=today.strftime("%Y-%m-%d"), yesterday=yesterday.strftime("%Y-%m-%d"))
 
-   prompt = encode(full_system_prompt := f"{bos_text}{SYSTEM_PROMPT}\n\n")
-   print(full_system_prompt)
+   sys_prompt = encode(full_system_prompt := f"{bos_text}{SYSTEM_PROMPT}\n\n")
+   print(full_system_prompt[:-1])
 
    assert not args.skip_load
-   start_pos = prefill(model, prompt, devices)
+   # start_pos = prefill(model, prompt, devices)
    while True:
       prompt = "Q: "
       # user_input = input(prompt).strip()
       # print()
       user_input = "What is the distance between the earth and the moon?"
       print(user_input)
-      toks = encode(user_start_text + prompt + user_input + user_end_text)
+      toks = sys_prompt + encode(user_start_text + user_input + user_end_text)
 
-      start_pos = prefill(model, toks[:-1], devices, start_pos=start_pos)
+      # start_pos = prefill(model, toks[:-1], devices, start_pos=start_pos)
       last_tok = toks[-1]
       count = 0
       is_thinking = True
@@ -258,9 +235,10 @@ if __name__ == "__main__":
                      f", {GlobalCounters.global_ops*1e-9:.2f} GOPS, {GlobalCounters.global_mem*1e-9:.2f} GB"+
                      (f", {GlobalCounters.global_mem*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s, param {param_bytes*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s" if DEBUG>=2 else "")) if DEBUG else None, enabled=args.timing):
 
-               tok = model(Tensor([[last_tok]], device=devices), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P)
-         tok = tok.item()
-         start_pos += 1
+               # tok = model(Tensor([[last_tok]], device=devices), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P)
+               tok = model(toks, devices, SAMPLE_PARAMS)
+         toks.append(tok)
+         # start_pos += 1
          count += 1
          last_tok = tok
          if tok in eos_token or count >= MAX_TOKENS:
