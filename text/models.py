@@ -5,16 +5,28 @@ from examples.llama3 import load
 
 from extra.models.llama import Transformer, ModelConfig, convert_from_huggingface, fix_bf16, TokenSampler
 
-from typing import Dict, Tuple, Set, List, Optional
+from typing import Dict, Tuple, Set, List, Optional, Callable
 from transformers import AutoTokenizer
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
+import re
 
-
+variable_pattern = re.compile(r"%%([^%]+)%%")
 @dataclass
 class Prompt:
    system_message: str
    user_message: str
-   assistant_message: str
+   assistant_prefix: str
+   assistant_suffix: str
+
+   def sub_vars(self, tokenizer:AutoTokenizer) -> None:
+      for name, template in asdict(self).items():
+         while True:
+            m = variable_pattern.search(template)
+            if not m: break
+            value = tokenizer.special_tokens_map.get(key := m.group(1), None)
+            assert value is not None, f"Failed to find key '{key}' in special_tokens_map, options were {list(tokenizer.special_tokens_map.keys())}"
+            template = template.replace(f"%%{key}%%", value)
+         setattr(self, name, template)
 
 @dataclass
 class ModelInst:
@@ -26,6 +38,20 @@ class ModelInst:
    index_filename: str = "model.safetensors.index.json"
    chunk_filename: str = "model-{i:05d}-of-{num_weights:05d}.safetensors"
    extra_filenames: List[str] = field(default_factory=lambda: ["tokenizer.json", "tokenizer_config.json"])
+   fix_weights: Callable[[Transformer,ModelConfig],Transformer] = (lambda m,c: m)
+
+
+def fix_qwen_weights(model:Transformer, cfg:ModelConfig) -> Transformer:
+   updated_layers = []
+   for layer in model.layers:
+      head_dim = cfg.get_head_dim()
+      layer.attention.wq = nn.Linear(cfg.dim, cfg.n_heads    * head_dim, bias=True)
+      layer.attention.wk = nn.Linear(cfg.dim, cfg.n_kv_heads * head_dim, bias=True)
+      layer.attention.wv = nn.Linear(cfg.dim, cfg.n_kv_heads * head_dim, bias=True)
+      updated_layers.append(layer)
+   model.layers = updated_layers
+   return model
+
 
 TARGET_DTYPE = dtypes.float16
 MODELS: Dict[str,ModelInst] = {
@@ -35,20 +61,22 @@ MODELS: Dict[str,ModelInst] = {
    #    weights_subdir="qwq_32b_preview",
    #    num_weights=17,
    # ),
-   # "Qwen-R1-32B": ModelInst(
-   #    params={"dim":5120, "n_heads":40, "n_kv_heads":8, "n_layers":64, "norm_eps":1e-5, "rope_theta":1000000, "vocab_size":152064, "hidden_dim":27648},
-   #    weights_url="https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B/resolve/main",
-   #    weights_subdir="deepseek_r1_qwen_32b",
-   #    num_weights=8,
-   #    chunk_filename="model-{i:05d}-of-{num_weights:06d}.safetensors", # WHY????
-   #    # Prompt template: https://unsloth.ai/blog/deepseekr1-dynamic
-   # ),
+   "Qwen-R1-32B": ModelInst(
+      config=ModelConfig(dim=5120, hidden_dim=27648, n_layers=64, n_heads=40, n_kv_heads=8, norm_eps=1e-5, vocab_size=152064, rope_theta=1000000.0, max_context=4096),
+      weights_url="https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B/resolve/main",
+      weights_subdir="deepseek_r1_qwen_32b",
+      num_weights=8,
+      chunk_filename="model-{i:05d}-of-{num_weights:06d}.safetensors", # WHY????
+      # Prompt template: https://unsloth.ai/blog/deepseekr1-dynamic
+      fix_weights=fix_qwen_weights,
+      prompt=Prompt("%%bos_token%%{0}", "<｜User｜>{0}\n", "<｜Assistant｜><think></think>", "\n"),
+   ),
    "Mistral-24B": ModelInst(
       config=ModelConfig(dim=5120, hidden_dim=32768, n_layers=40, n_heads=32, head_dim=128, n_kv_heads=8, norm_eps=1e-5, vocab_size=131072, rope_theta=100000000.0, max_context=32768),
       weights_url="https://huggingface.co/mistralai/Mistral-Small-24B-Instruct-2501/resolve/main",
       weights_subdir="mistral_small_24b_instruct",
       num_weights=10,
-      prompt=Prompt("<s>{0}\n\n", "[INST] {0} [/INST]", "{0}"),
+      prompt=Prompt("<s>{0}\n\n", "[INST] {0} [/INST]", "", ""),
    ),
 }
 
@@ -132,14 +160,7 @@ def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -
    tokenizer = AutoTokenizer.from_pretrained(str(model_path.parent))
 
    model = Transformer(inst.config)
-   # updated_layers = []
-   # for layer in model.layers:
-   #    head_dim = inst.params["dim"] // inst.params["n_heads"]
-   #    layer.attention.wq = nn.Linear(inst.params["dim"], inst.params["n_heads"]    * head_dim, bias=True)
-   #    layer.attention.wk = nn.Linear(inst.params["dim"], inst.params["n_kv_heads"] * head_dim, bias=True)
-   #    layer.attention.wv = nn.Linear(inst.params["dim"], inst.params["n_kv_heads"] * head_dim, bias=True)
-   #    updated_layers.append(layer)
-   # model.layers = updated_layers
+   model = inst.fix_weights(model, inst.config)
 
    # split_into_blocks(get_state_dict(model), inst.params["n_layers"])
    shard_across(get_state_dict(model), tuple(device_mem.keys()))
@@ -182,36 +203,26 @@ if __name__ == "__main__":
          device_mem[f"{Device.DEFAULT}:{i}"] = args.vram_limit*(1024**3)
       devices = tuple(device_mem.keys())
       model, tokenizer = load_model(inst, device_mem, args.skip_load)
-
       param_bytes = sum(x.lazydata.size * x.dtype.itemsize for x in get_parameters(model))
 
-   def encode(content:str):
+   # Prepare promtps and encoding
+   inst.prompt.sub_vars(tokenizer)
+   def encode(content:str) -> List[int]:
       return tokenizer.encode(content, add_special_tokens=False)
-
-   MAX_TOKENS = 256
-
-   user_start_token = encode(user_start_text := "[INST]")
-   user_end_token   = encode(user_end_text   := "[/INST]")
-   # bos_token = encode(bos_text := tokenizer.special_tokens_map["bos_token"])
    eos_token = encode(eos_text := tokenizer.special_tokens_map["eos_token"])
 
+   MAX_TOKENS = 256
    SYSTEM_PROMPT = "You are an helpful assistant. Answer questions directly. Keep responses short and simple."
 
    sys_prompt = encode(full_system_prompt := inst.prompt.system_message.format(SYSTEM_PROMPT))
    print(full_system_prompt[:-1])
-
    assert not args.skip_load
-   # start_pos = prefill(model, prompt, devices)
    while True:
       prompt = "Q: "
-      # user_input = input(prompt).strip()
-      # print()
       user_input = inst.prompt.user_message.format("What is the distance between the earth and the moon?")
-      print(user_input)
-      toks = sys_prompt + encode(user_input)
+      print(block := user_input + inst.prompt.assistant_prefix)
+      toks = sys_prompt + encode(block)
 
-      # start_pos = prefill(model, toks[:-1], devices, start_pos=start_pos)
-      last_tok = toks[-1]
       count = 0
       is_thinking = True
       while True:
@@ -222,11 +233,8 @@ if __name__ == "__main__":
             with Timing("enqueue in ", on_exit=(lambda et: (f", {(GlobalCounters.time_sum_s-st)*1e3:.2f} ms on GPU" if DEBUG>=2 else "")+
                      f", {GlobalCounters.global_ops*1e-9:.2f} GOPS, {GlobalCounters.global_mem*1e-9:.2f} GB"+
                      (f", {GlobalCounters.global_mem*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s, param {param_bytes*1e-9/(GlobalCounters.time_sum_s-st):.2f} GB/s" if DEBUG>=2 else "")) if DEBUG else None, enabled=args.timing):
-
-               # tok = model(Tensor([[last_tok]], device=devices), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P)
                tok = model(toks, devices, SAMPLER)
          toks.append(tok)
-         # start_pos += 1
          count += 1
          last_tok = tok
          if tok in eos_token or count >= MAX_TOKENS:
