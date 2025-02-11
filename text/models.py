@@ -92,47 +92,6 @@ MODELS: Dict[str,ModelInst] = {
    )
 }
 
-
-def split_into_blocks(state_dict:Dict[str,Tensor], n_layers:int, device_mem:Dict[str,int]) -> None:
-   blocks: List[List[Tensor]] = []
-   seen: Set[str] = set()
-   phases = [
-      ["tok_embeddings.", "freqs_cis"],
-      *[[f"layers.{i}."] for i in range(n_layers)],
-      ["norm.", "output."],
-   ]
-
-   for phase in phases:
-      block = []
-      for k, w in state_dict.items():
-         for start in phase:
-            if k.startswith(start):
-               assert k not in seen, f"Duplicated key {k} found in phase {phase}"
-               seen.add(k)
-               block.append(w)
-               break
-      assert len(block) > 0, f"Found 0 keys for phase {phase}"
-      blocks.append(block)
-
-   missing = set(state_dict.keys()).difference(seen)
-   assert len(missing) == 0, f"Missed the following keys: {list(missing)}"
-
-   mem_rem = {k:v for k,v in device_mem.items()}
-   dev_key = list(mem_rem.keys())[0]
-   for b in blocks:
-      sz = sum(w.lazydata.size * TARGET_DTYPE.itemsize for w in b)
-      while True:
-         if sz <= mem_rem[dev_key]:
-            for w in b:
-               w.replace(w.to(dev_key).cast(TARGET_DTYPE))
-            mem_rem[dev_key] -= sz
-            break
-
-         mem_rem.pop(dev_key)
-         assert len(mem_rem) > 0, f"Ran out of memory loading model"
-         dev_key = list(mem_rem.keys())[0]
-
-
 def shard_across(state_dict:Dict[str,Tensor], devices:Tuple[str,...]) -> None:
    def get_axis(key:str) -> Optional[int]:
       if '.attention.' in key: return None
@@ -147,7 +106,6 @@ def shard_across(state_dict:Dict[str,Tensor], devices:Tuple[str,...]) -> None:
    for k, w in state_dict.items():
       w.replace(w.shard(devices, axis=get_axis(k)).cast(TARGET_DTYPE))
 
-
 def diff_state_dict_keys(model_set:Set[str], disk_set:Set[str]) -> None:
    only_model = model_set.difference(disk_set)
    only_disk  = disk_set .difference(model_set)
@@ -158,7 +116,6 @@ def diff_state_dict_keys(model_set:Set[str], disk_set:Set[str]) -> None:
       print("\nONLY DISK:\n" + "\n".join(only_disk))
    if len(only_model) > 0 or len(only_disk) > 0:
       print()
-
 
 def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -> Tuple[Transformer,AutoTokenizer]:
    index_filename = "model.safetensors.index.json"
@@ -174,7 +131,6 @@ def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -
    model = Transformer(inst.config)
    model = inst.fix_weights(model, inst.config)
 
-   # split_into_blocks(get_state_dict(model), inst.params["n_layers"])
    shard_across(get_state_dict(model), tuple(device_mem.keys()))
 
    weights = fix_bf16(convert_from_huggingface(load(str(model_path)), model, inst.config.n_heads, inst.config.n_kv_heads, permute_layers=False))
@@ -184,13 +140,6 @@ def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -
 
    return model, tokenizer
 
-# SAMPLER = TokenSampler(
-#    temperature=0.3,
-#    top_k=30,
-#    top_p=0.3,
-#    alpha_f=0.3,
-#    alpha_p=0.3,
-# )
 SAMPLER = TokenSampler(
    temperature=0.95,
    top_k=0,
