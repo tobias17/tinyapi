@@ -78,6 +78,18 @@ MODELS: Dict[str,ModelInst] = {
       num_weights=10,
       prompt=Prompt("<s>{0}\n\n", "[INST] {0} [/INST]", "", ""),
    ),
+   "Llama-8B": ModelInst(
+      config=ModelConfig(dim=4096, hidden_dim=14336, n_layers=32, n_heads=32, n_kv_heads=8, norm_eps=1e-5, vocab_size=128256, rope_theta=500000.0, max_context=4096),
+      weights_url="https://huggingface.co/TriAiExperiments/SFR-Iterative-DPO-LLaMA-3-8B-R/resolve/main",
+      weights_subdir="llama3-8b-sfr",
+      num_weights=4,
+      prompt=Prompt(
+         "<|start_header_id|>system<|end_header_id|>\n\n{0}<|eot_id|>",
+         "<|start_header_id|>user<|end_header_id|>\n\n{0}<|eot_id|>",
+         "<|start_header_id|>assistant<|end_header_id|>\n\n",
+         "<|eot_id|>",
+      ),
+   )
 }
 
 
@@ -172,12 +184,19 @@ def load_model(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -
 
    return model, tokenizer
 
+# SAMPLER = TokenSampler(
+#    temperature=0.3,
+#    top_k=30,
+#    top_p=0.3,
+#    alpha_f=0.3,
+#    alpha_p=0.3,
+# )
 SAMPLER = TokenSampler(
-   temperature=0.3,
-   top_k=30,
-   top_p=0.3,
-   alpha_f=0.3,
-   alpha_p=0.3,
+   temperature=0.95,
+   top_k=0,
+   top_p=0.0,
+   alpha_f=0.0,
+   alpha_p=0.0,
 )
 
 if __name__ == "__main__":
@@ -213,6 +232,7 @@ if __name__ == "__main__":
 
    MAX_TOKENS = 256
    SYSTEM_PROMPT = "You are an helpful assistant. Answer questions directly. Keep responses short and simple."
+   LLAMA_TOKENS = [128000, 128006, 882, 128007, 271, 3923, 374, 279, 6138, 1990, 279, 9578, 323, 279, 18266, 30, 128009, 128006, 78191, 128007, 271]
 
    sys_prompt = encode(full_system_prompt := inst.prompt.system_message.format(SYSTEM_PROMPT))
    print(full_system_prompt[:-1])
@@ -222,6 +242,7 @@ if __name__ == "__main__":
       user_input = inst.prompt.user_message.format("What is the distance between the earth and the moon?")
       print(block := user_input + inst.prompt.assistant_prefix)
       toks = sys_prompt + encode(block)
+      toks = LLAMA_TOKENS
 
       count = 0
       is_thinking = True
