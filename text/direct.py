@@ -146,6 +146,9 @@ if __name__ == "__main__":
   # start_pos = prefill(model, toks[:-1])
   # last_tok = toks[-1]
 
+  print(f"Input tokens: {toks}")
+  print(f"Stop tokens: {tokenizer.stop_tokens}")
+
   while True:
     tok = model(toks, device, SAMPLER)
     toks.append(tok)
