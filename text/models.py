@@ -55,6 +55,7 @@ class ModelInst:
 
 
 def fix_qwen_weights(model:Transformer, cfg:ModelConfig) -> Transformer:
+   assert cfg.n_kv_heads is not None
    updated_layers = []
    for layer in model.layers:
       head_dim = cfg.get_head_dim()
@@ -106,7 +107,6 @@ MODELS: Dict[str,ModelInst] = {
 }
 
 
-
 def concat_weights(models, device):
    def convert(name) -> Tensor:
       disk_tensors: List[Tensor] = [model[name] for model in models]
@@ -117,10 +117,10 @@ def concat_weights(models, device):
       return lazy_tensors[0].cat(*lazy_tensors[1:], dim=axis)
    return {name: convert(name) for name in {name: None for model in models for name in model}}
 
-def load(fn:str):
+def load_item(fn:str):
    if fn.endswith('.index.json'):
       with open(fn) as fp: weight_map = json.load(fp)['weight_map']
-      parts = {n: load(str(Path(fn).parent / Path(n).name)) for n in set(weight_map.values())}
+      parts = {n: load_item(str(Path(fn).parent / Path(n).name)) for n in set(weight_map.values())}
       return {k: parts[n][k] for k, n in weight_map.items()}
    elif fn.endswith(".gguf"):
       gguf_tensor = Tensor.empty(os.stat(fn).st_size, dtype=dtypes.uint8, device=f"disk:{fn}").to(Device.DEFAULT)
@@ -136,11 +136,11 @@ def build_transformer(model_path:Path, cfg:ModelConfig, files:int, device):
 
    # load weights
    if model_path.is_dir():
-      if (model_path / "model.safetensors.index.json").exists(): weights = load(str(model_path / "model.safetensors.index.json"))
-      elif (model_path / "model.safetensors").exists(): weights = load(str(model_path / "model.safetensors"))
-      else: weights = concat_weights([load(str(model_path / f"consolidated.{i:02d}.pth")) for i in range(files)], device[0] if isinstance(device, tuple) else device)
+      if (model_path / "model.safetensors.index.json").exists(): weights = load_item(str(model_path / "model.safetensors.index.json"))
+      elif (model_path / "model.safetensors").exists(): weights = load_item(str(model_path / "model.safetensors"))
+      else: weights = concat_weights([load_item(str(model_path / f"consolidated.{i:02d}.pth")) for i in range(files)], device[0] if isinstance(device, tuple) else device)
    else:
-      weights = load(str(model_path))
+      weights = load_item(str(model_path))
    if "model.embed_tokens.weight" in weights:
       assert cfg.n_kv_heads is not None
       weights = convert_from_huggingface(weights, model, cfg.n_heads, cfg.n_kv_heads)
@@ -149,20 +149,20 @@ def build_transformer(model_path:Path, cfg:ModelConfig, files:int, device):
    with Context(BEAM=0):
       # shard
       if isinstance(device, tuple):
+         def get_shard_axis(k:str) -> Optional[int]:
+            if '.attention.' in k: return -1
+            if '.feed_forward.w1.' in k: return 0
+            if '.feed_forward.w3.' in k: return 0
+            if '.feed_forward.' in k: return -1
+            if 'tok_embeddings.weight' in k: return 0
+            if 'output.weight' in k: return 0
+            return None
          for k,v in nn.state.get_state_dict(model).items():
-            if '.attention.' in k: v.shard_(device, axis=-1)
-            elif '.feed_forward.w1.' in k: v.shard_(device, axis=0)
-            elif '.feed_forward.w3.' in k: v.shard_(device, axis=0)
-            elif '.feed_forward.' in k: v.shard_(device, axis=-1)
-            elif 'tok_embeddings.weight' in k: v.shard_(device, axis=0)
-            elif 'output.weight' in k: v.shard_(device, axis=0)
-            else: v.shard_(device, axis=None)
+            v.replace(v.cast(TARGET_DTYPE).shard(device, axis=get_shard_axis(k)))
 
       # replace weights in model
       load_state_dict(model, weights, strict=False, consume=True)
    return model
-
-
 
 
 MAX_TOKENS = 256
