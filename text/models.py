@@ -8,7 +8,7 @@ from extra.models.llama import Transformer, ModelConfig, convert_from_huggingfac
 
 from typing import Dict, Tuple, Set, List, Optional, Callable, Union
 from dataclasses import dataclass, field, asdict
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer
 from pathlib import Path
 import re, json, os
 
@@ -86,11 +86,11 @@ MODELS: Dict[str,ModelInst] = {
       prompt=Prompt("%%bos_token%%{0}", "<｜User｜>{0}\n", "<｜Assistant｜><think></think>", ("%%eos_token%%",)),
    ),
    "Mistral-24B": ModelInst(
-      config=ModelConfig(dim=5120, hidden_dim=32768, n_layers=40, n_heads=32, head_dim=128, n_kv_heads=8, norm_eps=1e-5, vocab_size=131072, rope_theta=100000000.0, max_context=32768),
+      config=ModelConfig(dim=5120, hidden_dim=32768, n_layers=40, n_heads=32, head_dim=128, n_kv_heads=8, norm_eps=1e-5, vocab_size=131072, rope_theta=100000000.0, max_context=4096), # max_context=32768
       weights_url="https://huggingface.co/mistralai/Mistral-Small-24B-Instruct-2501/resolve/main",
       weights_subdir="mistral_small_24b_instruct",
       num_weights=10,
-      prompt=Prompt("<s>{0}\n\n", "[INST] {0} [/INST]", "", ("</s>",)),
+      prompt=Prompt("<s>[SYSTEM_PROMPT]{0}[/SYSTEM_PROMPT]", "[INST]{0}[/INST]", "", ("</s>",)),
    ),
    "Llama-8B": ModelInst(
       config=ModelConfig(dim=4096, hidden_dim=14336, n_layers=32, n_heads=32, n_kv_heads=8, norm_eps=1e-5, vocab_size=128256, rope_theta=500000.0, max_context=4096),
@@ -130,15 +130,28 @@ def load_item(fn:str):
    else:
       return torch_load(fn)
 
-def build_transformer(model_path:Path, cfg:ModelConfig, files:int, device):
+def build_transformer(inst:ModelInst, device) -> Tuple[Transformer, PreTrainedTokenizer]:
+   # download weights
+   def download(filename:str) -> Path:
+      return fetch(f"{inst.weights_url}/{filename}", filename, subdir=inst.weights_subdir)
+   model_path = download(inst.index_filename)
+   for i in range(1, inst.num_weights+1):
+      download(inst.chunk_filename.format(i=i, num_weights=inst.num_weights))
+   for filename in inst.extra_filenames:
+      download(filename)
+
+   # load tokenizer
+   tokenizer = AutoTokenizer.from_pretrained(str(model_path.parent))
+
    # build model
+   cfg = inst.config
    model = Transformer(cfg)
 
    # load weights
    if model_path.is_dir():
       if (model_path / "model.safetensors.index.json").exists(): weights = load_item(str(model_path / "model.safetensors.index.json"))
       elif (model_path / "model.safetensors").exists(): weights = load_item(str(model_path / "model.safetensors"))
-      else: weights = concat_weights([load_item(str(model_path / f"consolidated.{i:02d}.pth")) for i in range(files)], device[0] if isinstance(device, tuple) else device)
+      else: weights = concat_weights([load_item(str(model_path / f"consolidated.{i:02d}.pth")) for i in range(inst.num_weights)], device[0] if isinstance(device, tuple) else device)
    else:
       weights = load_item(str(model_path))
    if "model.embed_tokens.weight" in weights:
@@ -162,7 +175,8 @@ def build_transformer(model_path:Path, cfg:ModelConfig, files:int, device):
 
       # replace weights in model
       load_state_dict(model, weights, strict=False, consume=True)
-   return model
+   
+   return model, tokenizer
 
 
 MAX_TOKENS = 256
@@ -190,6 +204,7 @@ if __name__ == "__main__":
    args = parser.parse_args()
 
    Tensor.manual_seed(42)
+   Tensor.no_grad = True
 
    # Load model
    with Context(BEAM=0):
@@ -198,11 +213,7 @@ if __name__ == "__main__":
       if len(device) == 1:
          device = device[0]
 
-      model_path = fetch("https://huggingface.co/TriAiExperiments/SFR-Iterative-DPO-LLaMA-3-8B-R/raw/main/model.safetensors.index.json", "model.safetensors.index.json", subdir="llama3-8b-sfr")
-      model = build_transformer(model_path, inst.config, 1, device=device) if not args.skip_load else (lambda a,b,c: 1)
-      tokenizer = AutoTokenizer.from_pretrained(str(model_path.parent))
-
-      param_bytes = sum(x.lazydata.size * x.dtype.itemsize for x in get_parameters(model))
+      model, tokenizer = build_transformer(inst, device) if not args.skip_load else ((lambda a,b,c: 1), PreTrainedTokenizer())
 
    # Prepare promtps and encoding
    inst.prompt.sub_vars(tokenizer)
