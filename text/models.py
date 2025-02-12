@@ -6,7 +6,7 @@ from examples.llama3 import load
 
 from extra.models.llama import Transformer, ModelConfig, convert_from_huggingface, fix_bf16, TokenSampler
 
-from typing import Dict, Tuple, Set, List, Optional, Callable
+from typing import Dict, Tuple, Set, List, Optional, Callable, Union
 from dataclasses import dataclass, field, asdict
 from transformers import AutoTokenizer
 from pathlib import Path
@@ -105,55 +105,6 @@ MODELS: Dict[str,ModelInst] = {
    )
 }
 
-def shard_across(state_dict:Dict[str,Tensor], devices:Tuple[str,...]) -> None:
-   def get_axis(key:str) -> Optional[int]:
-      if '.attention.' in key: return None
-      if '.attention.' in key: return -1
-      if '.feed_forward.w1.' in key: return 0
-      if '.feed_forward.w3.' in key: return 0
-      if '.feed_forward.' in key: return -1
-      if 'tok_embeddings.weight' in key: return 0
-      if 'output.weight' in key: return 0
-      return None
-
-   for k, w in state_dict.items():
-      w.replace(w.shard(devices, axis=get_axis(k)).cast(TARGET_DTYPE))
-
-def diff_state_dict_keys(model_set:Set[str], disk_set:Set[str]) -> None:
-   only_model = model_set.difference(disk_set)
-   only_disk  = disk_set .difference(model_set)
-
-   if len(only_model) > 0:
-      print("\nONLY MODEL:\n" + "\n".join(only_model))
-   if len(only_disk) > 0:
-      print("\nONLY DISK:\n" + "\n".join(only_disk))
-   if len(only_model) > 0 or len(only_disk) > 0:
-      print()
-
-def load_model_old(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=False) -> Tuple[Transformer,AutoTokenizer]:
-   index_filename = "model.safetensors.index.json"
-   model_path = fetch(f"{inst.weights_url}/{inst.index_filename}?download=true", index_filename, subdir=inst.weights_subdir)
-   for i in range(1, inst.num_weights+1):
-      filename = inst.chunk_filename.format(i=i, num_weights=inst.num_weights)
-      fetch(f"{inst.weights_url}/{filename}?download=true", filename, subdir=inst.weights_subdir)
-
-   for filename in inst.extra_filenames:
-      fetch(f"{inst.weights_url}/{filename}?download=true", filename, subdir=inst.weights_subdir)
-   tokenizer = AutoTokenizer.from_pretrained(str(model_path.parent))
-
-   model = Transformer(inst.config)
-   model = inst.fix_weights(model, inst.config)
-
-   shard_across(get_state_dict(model), tuple(device_mem.keys()))
-
-   weights = fix_bf16(convert_from_huggingface(load(str(model_path)), model, inst.config.n_heads, inst.config.n_kv_heads, permute_layers=False))
-   diff_state_dict_keys(set(get_state_dict(weights).keys()), set(weights.keys()))
-   if not skip_load:
-      load_state_dict(model, weights, strict=False, consume=True)
-
-   return model, tokenizer
-
-
 
 
 def concat_weights(models, device):
@@ -228,7 +179,7 @@ if __name__ == "__main__":
    parser = argparse.ArgumentParser("ModelTest", description="Performs a test load and generation of the specified model")
    parser.add_argument('model', choices=list(MODELS.keys()), help="Which model to load and test")
    parser.add_argument('--gpus', type=int, default=4, help="Number of GPUs allowed to be used")
-   parser.add_argument('--dev-offset', type=int, default=1, help="Skips the first N devices to load the weights")
+   parser.add_argument('--gpu-offset', type=int, default=1, help="Skips the first N devices to load the weights")
    parser.add_argument('--vram-limit', type=int, default=16, help="Amount of VRAM in GB per GPU to load weights")
 
    parser.add_argument("--count", type=int, default=30, help="Max number of tokens to generate")
@@ -243,10 +194,10 @@ if __name__ == "__main__":
    # Load model
    with Context(BEAM=0):
       inst = MODELS[args.model]
-      # device = Device.DEFAULT
-      device = (Device.DEFAULT, f"{Device.DEFAULT}:1")
+      device: Union[str,Tuple[str,...]] = tuple(f"{Device.DEFAULT}:{i}" for i in range(args.gpu_offset, args.gpu_offset+args.gpus))
+      if len(device) == 1:
+         device = device[0]
 
-      # model, tokenizer = load_model(inst, device_mem, args.skip_load)
       model_path = fetch("https://huggingface.co/TriAiExperiments/SFR-Iterative-DPO-LLaMA-3-8B-R/raw/main/model.safetensors.index.json", "model.safetensors.index.json", subdir="llama3-8b-sfr")
       model = build_transformer(model_path, inst.config, 1, device=device) if not args.skip_load else (lambda a,b,c: 1)
       tokenizer = AutoTokenizer.from_pretrained(str(model_path.parent))
