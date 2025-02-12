@@ -50,6 +50,7 @@ class ModelArchitecture:
    weights_subdir: str
    num_weights: int
    prompt: Prompt
+   default_system_prompt: str = "You are an helpful assistant."
    index_filename: str = "model.safetensors.index.json"
    chunk_filename: str = "model-{i:05d}-of-{num_weights:05d}.safetensors"
    extra_filenames: List[str] = field(default_factory=lambda: ["tokenizer.json", "tokenizer_config.json"])
@@ -78,14 +79,13 @@ MODELS: Dict[str,ModelArchitecture] = {
    #    num_weights=17,
    # ),
    "Qwen-R1-32B": ModelArchitecture(
-      config=ModelConfig(dim=5120, hidden_dim=27648, n_layers=64, n_heads=40, n_kv_heads=8, norm_eps=1e-5, vocab_size=152064, rope_theta=1000000.0, max_context=4096),
+      config=ModelConfig(dim=5120, hidden_dim=27648, n_layers=64, n_heads=40, n_kv_heads=8, norm_eps=1e-5, vocab_size=152064, rope_theta=1000000.0, max_context=4096, shard_kvcache=3),
       weights_url="https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B/resolve/main",
       weights_subdir="deepseek_r1_qwen_32b",
       num_weights=8,
       chunk_filename="model-{i:05d}-of-{num_weights:06d}.safetensors", # WHY????
-      # Prompt template: https://unsloth.ai/blog/deepseekr1-dynamic
       fix_weights=fix_qwen_weights,
-      prompt=Prompt("%%bos_token%%{0}", "<｜User｜>{0}\n", "<｜Assistant｜><think></think>", ("%%eos_token%%",)),
+      prompt=Prompt("%%bos_token%%{0}", "<｜User｜>{0}\n", "<｜Assistant｜><think>", ("%%eos_token%%",)),
    ),
    "Mistral-24B": ModelArchitecture(
       config=ModelConfig(dim=5120, hidden_dim=32768, n_layers=40, n_heads=32, head_dim=128, n_kv_heads=8, norm_eps=1e-5, vocab_size=131072, rope_theta=100000000.0, max_context=4096), # max_context=32768
@@ -93,6 +93,7 @@ MODELS: Dict[str,ModelArchitecture] = {
       weights_subdir="mistral_small_24b_instruct",
       num_weights=10,
       prompt=Prompt("<s>[SYSTEM_PROMPT]{0}[/SYSTEM_PROMPT]", "[INST]{0}[/INST]", "", ("</s>",)),
+      default_system_prompt="You are an helpful assistant. Keep answers short and direct.",
    ),
    "Llama-8B": ModelArchitecture(
       config=ModelConfig(dim=4096, hidden_dim=14336, n_layers=32, n_heads=32, n_kv_heads=8, norm_eps=1e-5, vocab_size=128256, rope_theta=500000.0, max_context=4096),
@@ -147,7 +148,7 @@ def build_transformer(arch:ModelArchitecture, device) -> Tuple[Transformer, PreT
 
    # build model
    cfg = arch.config
-   model = Transformer(cfg)
+   model = arch.fix_weights(Transformer(cfg), cfg)
 
    # load weights
    if model_path.is_dir():
@@ -196,13 +197,7 @@ if __name__ == "__main__":
    parser.add_argument('model', choices=list(MODELS.keys()), help="Which model to load and test")
    parser.add_argument('--gpus', type=int, default=4, help="Number of GPUs allowed to be used")
    parser.add_argument('--gpu-offset', type=int, default=1, help="Skips the first N devices to load the weights")
-   parser.add_argument('--vram-limit', type=int, default=16, help="Amount of VRAM in GB per GPU to load weights")
-
-   parser.add_argument("--count", type=int, default=30, help="Max number of tokens to generate")
-   parser.add_argument("--prompt", type=str, default="Q: What is the distance from the earth to the moon?\nA: ", help="Phrase to start with")
-   parser.add_argument("--timing", action="store_true", help="Print timing per token")
    parser.add_argument("--skip-load", action="store_true")
-
    args = parser.parse_args()
 
    Tensor.manual_seed(42)
@@ -221,7 +216,7 @@ if __name__ == "__main__":
    p = arch.prompt.sub_vars(tokenizer)
    assert len(p.eos_tokens) > 0
 
-   prompt = p.system_message.format("You are an helpful assistant.") \
+   prompt = p.system_message.format(arch.default_system_prompt) \
             + p.user_message.format("what is the distance between the earth and the moon?") \
             + p.assistant_prefix
    tokens = tokenizer.encode(prompt, add_special_tokens=False)
