@@ -18,17 +18,27 @@ class Prompt:
    system_message: str
    user_message: str
    assistant_prefix: str
-   assistant_suffix: str
+   eos_texts: Tuple[str,...]
 
    def sub_vars(self, tokenizer:AutoTokenizer) -> None:
       for name, template in asdict(self).items():
-         while True:
-            m = variable_pattern.search(template)
-            if not m: break
-            value = tokenizer.special_tokens_map.get(key := m.group(1), None)
-            assert value is not None, f"Failed to find key '{key}' in special_tokens_map, options were {list(tokenizer.special_tokens_map.keys())}"
-            template = template.replace(f"%%{key}%%", value)
-         setattr(self, name, template)
+         if isinstance(template, str):
+            while True:
+               m = variable_pattern.search(template)
+               if not m: break
+               value = tokenizer.special_tokens_map.get(key := m.group(1), None)
+               assert value is not None, f"Failed to find key '{key}' in special_tokens_map, options were {list(tokenizer.special_tokens_map.keys())}"
+               template = template.replace(f"%%{key}%%", value)
+            setattr(self, name, template)
+         else:
+            assert isinstance(template, tuple)
+            tokens = set()
+            for text in template:
+               token = tokenizer.encode(text, add_special_tokens=False)
+               assert len(token) == 1, f"Text '{text}' encoded into tokens {token}, expected exactly 1 token value"
+               tokens.add(token[0])
+            setattr(self, name.replace("texts", "tokens"), tokens)
+            print(tokens)
 
 @dataclass
 class ModelInst:
@@ -86,10 +96,10 @@ MODELS: Dict[str,ModelInst] = {
       weights_subdir="llama3-8b-sfr",
       num_weights=4,
       prompt=Prompt(
-         "<|start_header_id|>system<|end_header_id|>\n\n{0}<|eot_id|>",
-         "<|start_header_id|>user<|end_header_id|>\n\n{0}<|eot_id|>",
-         "<|start_header_id|>assistant<|end_header_id|>\n\n",
-         "<|eot_id|>",
+         system_message  ="<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{0}<|eot_id|>",
+         user_message    ="<|start_header_id|>user<|end_header_id|>\n\n{0}<|eot_id|>",
+         assistant_prefix="<|start_header_id|>assistant<|end_header_id|>\n\n",
+         eos_texts       =("<|end_of_text|>", "<|eot_id|>"),
       ),
    )
 }
@@ -145,15 +155,15 @@ def load_model_old(inst:ModelInst, device_mem:Dict[str,int], skip_load:bool=Fals
 
 
 
-def concat_weights(models, device=None):
-  def convert(name) -> Tensor:
-    disk_tensors: List[Tensor] = [model[name] for model in models]
-    if len(disk_tensors) == 1 or len(disk_tensors[0].shape) == 1:
-      return disk_tensors[0].to(device=device)
-    axis = 1 if name.endswith(".attention.wo.weight") or name.endswith(".feed_forward.w2.weight") else 0
-    lazy_tensors = [data.to(device=device) for data in disk_tensors]
-    return lazy_tensors[0].cat(*lazy_tensors[1:], dim=axis)
-  return {name: convert(name) for name in {name: None for model in models for name in model}}
+def concat_weights(models, device):
+   def convert(name) -> Tensor:
+      disk_tensors: List[Tensor] = [model[name] for model in models]
+      if len(disk_tensors) == 1 or len(disk_tensors[0].shape) == 1:
+         return disk_tensors[0].to(device=device)
+      axis = 1 if name.endswith(".attention.wo.weight") or name.endswith(".feed_forward.w2.weight") else 0
+      lazy_tensors = [data.to(device=device) for data in disk_tensors]
+      return lazy_tensors[0].cat(*lazy_tensors[1:], dim=axis)
+   return {name: convert(name) for name in {name: None for model in models for name in model}}
 
 def load(fn:str):
    if fn.endswith('.index.json'):
@@ -168,7 +178,7 @@ def load(fn:str):
    else:
       return torch_load(fn)
 
-def build_transformer(model_path:Path, cfg:ModelConfig, files:int, device=None):
+def build_transformer(model_path:Path, cfg:ModelConfig, files:int, device):
    # build model
    model = Transformer(cfg)
 
@@ -232,17 +242,12 @@ if __name__ == "__main__":
    # Load model
    with Context(BEAM=0):
       inst = MODELS[args.model]
-      # device_mem: Dict[str,int] = {}
-      # for i in range(args.dev_offset, args.dev_offset + args.gpus):
-      #    device_mem[f"{Device.DEFAULT}:{i}"] = args.vram_limit*(1024**3)
-      # device = tuple(device_mem.keys())
-      # if len(device) == 1:
-      #    device = device[0]
-      device = Device.DEFAULT
+      # device = Device.DEFAULT
+      device = (Device.DEFAULT, f"{Device.DEFAULT}:1")
 
       # model, tokenizer = load_model(inst, device_mem, args.skip_load)
       model_path = fetch("https://huggingface.co/TriAiExperiments/SFR-Iterative-DPO-LLaMA-3-8B-R/raw/main/model.safetensors.index.json", "model.safetensors.index.json", subdir="llama3-8b-sfr")
-      model = build_transformer(model_path, inst.config, 1, device=device)
+      model = build_transformer(model_path, inst.config, 1, device=device) if not args.skip_load else (lambda a,b,c: 1)
       tokenizer = AutoTokenizer.from_pretrained(str(model_path.parent))
 
       param_bytes = sum(x.lazydata.size * x.dtype.itemsize for x in get_parameters(model))
@@ -257,6 +262,12 @@ if __name__ == "__main__":
    SYSTEM_PROMPT = "You are an helpful assistant. Answer questions directly. Keep responses short and simple."
    LLAMA_TOKENS = [128000, 128006, 9125, 128007, 271, 2675, 527, 459, 11190, 18328, 13, 128009, 128006, 882, 128007, 271, 12840, 374, 279, 6138, 1990, 279, 9578, 323, 279, 18266, 30, 128009, 128006, 78191, 128007, 271]
    LLAMA_STOP   = {128001, 128009}
+
+   print(f"orig: {LLAMA_TOKENS}")
+   OURS_PROMPT = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are an helpful assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nwhat is the distance between the earth and the moon?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+   print(f"ours: {encode(OURS_PROMPT)}")
+   generated = inst.prompt.system_message.format("You are an helpful assistant.") + inst.prompt.user_message.format("what is the distance between the earth and the moon?") + inst.prompt.assistant_prefix
+   print(f"gens: {encode(generated)}")
 
    sys_prompt = encode(full_system_prompt := inst.prompt.system_message.format(SYSTEM_PROMPT))
    print(full_system_prompt[:-1])
