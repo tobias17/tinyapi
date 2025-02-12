@@ -19,26 +19,27 @@ class Prompt:
    user_message: str
    assistant_prefix: str
    eos_texts: Tuple[str,...]
+   eos_tokens: Set[int] = field(default_factory=lambda: set())
+
+   def __sub_text(self, text:str, tokenizer:AutoTokenizer) -> str:
+      while True:
+         m = variable_pattern.search(text)
+         if not m: return text
+         value = tokenizer.special_tokens_map.get(key := m.group(1), None)
+         assert value is not None, f"Failed to find key '{key}' in special_tokens_map, options were {list(tokenizer.special_tokens_map.keys())}"
+         text = text.replace(f"%%{key}%%", value)
 
    def sub_vars(self, tokenizer:AutoTokenizer) -> None:
-      for name, template in asdict(self).items():
-         if isinstance(template, str):
-            while True:
-               m = variable_pattern.search(template)
-               if not m: break
-               value = tokenizer.special_tokens_map.get(key := m.group(1), None)
-               assert value is not None, f"Failed to find key '{key}' in special_tokens_map, options were {list(tokenizer.special_tokens_map.keys())}"
-               template = template.replace(f"%%{key}%%", value)
-            setattr(self, name, template)
-         else:
-            assert isinstance(template, tuple)
-            tokens = set()
-            for text in template:
-               token = tokenizer.encode(text, add_special_tokens=False)
-               assert len(token) == 1, f"Text '{text}' encoded into tokens {token}, expected exactly 1 token value"
-               tokens.add(token[0])
-            setattr(self, name.replace("texts", "tokens"), tokens)
-            print(tokens)
+      self.system_message   = self.__sub_text(self.system_message,   tokenizer)
+      self.user_message     = self.__sub_text(self.user_message,     tokenizer)
+      self.assistant_prefix = self.__sub_text(self.assistant_prefix, tokenizer)
+
+      for text in self.eos_texts:
+         text = self.__sub_text(text, tokenizer)
+         token = tokenizer.encode(text, add_special_tokens=False)
+         assert len(token) == 1, f"Text '{text}' encoded into tokens {token}, expected exactly 1 token value"
+         self.eos_tokens.add(token[0])
+
 
 @dataclass
 class ModelInst:
@@ -81,14 +82,14 @@ MODELS: Dict[str,ModelInst] = {
       chunk_filename="model-{i:05d}-of-{num_weights:06d}.safetensors", # WHY????
       # Prompt template: https://unsloth.ai/blog/deepseekr1-dynamic
       fix_weights=fix_qwen_weights,
-      prompt=Prompt("%%bos_token%%{0}", "<｜User｜>{0}\n", "<｜Assistant｜><think></think>", "\n"),
+      prompt=Prompt("%%bos_token%%{0}", "<｜User｜>{0}\n", "<｜Assistant｜><think></think>", ("%%eos_token%%",)),
    ),
    "Mistral-24B": ModelInst(
       config=ModelConfig(dim=5120, hidden_dim=32768, n_layers=40, n_heads=32, head_dim=128, n_kv_heads=8, norm_eps=1e-5, vocab_size=131072, rope_theta=100000000.0, max_context=32768),
       weights_url="https://huggingface.co/mistralai/Mistral-Small-24B-Instruct-2501/resolve/main",
       weights_subdir="mistral_small_24b_instruct",
       num_weights=10,
-      prompt=Prompt("<s>{0}\n\n", "[INST] {0} [/INST]", "", ""),
+      prompt=Prompt("<s>{0}\n\n", "[INST] {0} [/INST]", "", ("</s>",)),
    ),
    "Llama-8B": ModelInst(
       config=ModelConfig(dim=4096, hidden_dim=14336, n_layers=32, n_heads=32, n_kv_heads=8, norm_eps=1e-5, vocab_size=128256, rope_theta=500000.0, max_context=4096),
@@ -213,7 +214,7 @@ def build_transformer(model_path:Path, cfg:ModelConfig, files:int, device):
 
 
 
-
+MAX_TOKENS = 256
 SAMPLER = TokenSampler(
    temperature=0.95,
    top_k=0,
@@ -254,37 +255,20 @@ if __name__ == "__main__":
 
    # Prepare promtps and encoding
    inst.prompt.sub_vars(tokenizer)
-   def encode(content:str) -> List[int]:
-      return tokenizer.encode(content, add_special_tokens=False)
-   eos_token = encode(eos_text := tokenizer.special_tokens_map["eos_token"])
 
-   MAX_TOKENS = 256
-   SYSTEM_PROMPT = "You are an helpful assistant. Answer questions directly. Keep responses short and simple."
-   LLAMA_TOKENS = [128000, 128006, 9125, 128007, 271, 2675, 527, 459, 11190, 18328, 13, 128009, 128006, 882, 128007, 271, 12840, 374, 279, 6138, 1990, 279, 9578, 323, 279, 18266, 30, 128009, 128006, 78191, 128007, 271]
-   LLAMA_STOP   = {128001, 128009}
-
-   print(f"orig: {LLAMA_TOKENS}")
-   OURS_PROMPT = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are an helpful assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nwhat is the distance between the earth and the moon?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-   print(f"ours: {encode(OURS_PROMPT)}")
-   generated = inst.prompt.system_message.format("You are an helpful assistant.") + inst.prompt.user_message.format("what is the distance between the earth and the moon?") + inst.prompt.assistant_prefix
-   print(f"gens: {encode(generated)}")
-
-   sys_prompt = encode(full_system_prompt := inst.prompt.system_message.format(SYSTEM_PROMPT))
-   print(full_system_prompt[:-1])
    assert not args.skip_load
+   assert len(inst.prompt.eos_tokens) > 0
 
-   # prompt = "Q: "
-   # user_input = inst.prompt.user_message.format("What is the distance between the earth and the moon?")
-   # print(block := user_input + inst.prompt.assistant_prefix)
-   # toks = sys_prompt + encode(block)
-   toks = LLAMA_TOKENS
-
+   prompt = inst.prompt.system_message.format("You are an helpful assistant.") \
+            + inst.prompt.user_message.format("what is the distance between the earth and the moon?") \
+            + inst.prompt.assistant_prefix
+   tokens = tokenizer.encode(prompt, add_special_tokens=False)
    count = 0
-   is_thinking = True
+
    while True:
-      tok = model(toks, device, SAMPLER)
-      toks.append(tok)
+      tok = model(tokens, device, SAMPLER)
+      tokens.append(tok)
       count += 1
-      if tok in LLAMA_STOP or count >= MAX_TOKENS: break
+      if tok in inst.prompt.eos_tokens or count >= MAX_TOKENS: break
       print(tokenizer.decode([tok]), end="", flush=True)
    print(flush=True)
