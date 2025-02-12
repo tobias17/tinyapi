@@ -29,7 +29,7 @@ class Prompt:
          assert value is not None, f"Failed to find key '{key}' in special_tokens_map, options were {list(tokenizer.special_tokens_map.keys())}"
          text = text.replace(f"%%{key}%%", value)
 
-   def sub_vars(self, tokenizer:AutoTokenizer) -> None:
+   def sub_vars(self, tokenizer:AutoTokenizer) -> 'Prompt':
       self.system_message   = self.__sub_text(self.system_message,   tokenizer)
       self.user_message     = self.__sub_text(self.user_message,     tokenizer)
       self.assistant_prefix = self.__sub_text(self.assistant_prefix, tokenizer)
@@ -39,10 +39,12 @@ class Prompt:
          token = tokenizer.encode(text, add_special_tokens=False)
          assert len(token) == 1, f"Text '{text}' encoded into tokens {token}, expected exactly 1 token value"
          self.eos_tokens.add(token[0])
+      
+      return self
 
 
 @dataclass
-class ModelInst:
+class ModelArchitecture:
    config: ModelConfig
    weights_url: str
    weights_subdir: str
@@ -68,14 +70,14 @@ def fix_qwen_weights(model:Transformer, cfg:ModelConfig) -> Transformer:
 
 
 TARGET_DTYPE = dtypes.float16
-MODELS: Dict[str,ModelInst] = {
-   # "Qwen-32B": ModelInst(
+MODELS: Dict[str,ModelArchitecture] = {
+   # "Qwen-32B": ModelArchitecture(
    #    params={"dim":5120, "n_heads":40, "n_kv_heads":8, "n_layers":64, "norm_eps":1e-5, "rope_theta":1000000, "vocab_size":152064, "hidden_dim":27648},
    #    weights_url="https://huggingface.co/Qwen/QwQ-32B-Preview/resolve/main",
    #    weights_subdir="qwq_32b_preview",
    #    num_weights=17,
    # ),
-   "Qwen-R1-32B": ModelInst(
+   "Qwen-R1-32B": ModelArchitecture(
       config=ModelConfig(dim=5120, hidden_dim=27648, n_layers=64, n_heads=40, n_kv_heads=8, norm_eps=1e-5, vocab_size=152064, rope_theta=1000000.0, max_context=4096),
       weights_url="https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B/resolve/main",
       weights_subdir="deepseek_r1_qwen_32b",
@@ -85,14 +87,14 @@ MODELS: Dict[str,ModelInst] = {
       fix_weights=fix_qwen_weights,
       prompt=Prompt("%%bos_token%%{0}", "<｜User｜>{0}\n", "<｜Assistant｜><think></think>", ("%%eos_token%%",)),
    ),
-   "Mistral-24B": ModelInst(
+   "Mistral-24B": ModelArchitecture(
       config=ModelConfig(dim=5120, hidden_dim=32768, n_layers=40, n_heads=32, head_dim=128, n_kv_heads=8, norm_eps=1e-5, vocab_size=131072, rope_theta=100000000.0, max_context=4096), # max_context=32768
       weights_url="https://huggingface.co/mistralai/Mistral-Small-24B-Instruct-2501/resolve/main",
       weights_subdir="mistral_small_24b_instruct",
       num_weights=10,
       prompt=Prompt("<s>[SYSTEM_PROMPT]{0}[/SYSTEM_PROMPT]", "[INST]{0}[/INST]", "", ("</s>",)),
    ),
-   "Llama-8B": ModelInst(
+   "Llama-8B": ModelArchitecture(
       config=ModelConfig(dim=4096, hidden_dim=14336, n_layers=32, n_heads=32, n_kv_heads=8, norm_eps=1e-5, vocab_size=128256, rope_theta=500000.0, max_context=4096),
       weights_url="https://huggingface.co/TriAiExperiments/SFR-Iterative-DPO-LLaMA-3-8B-R/resolve/main",
       weights_subdir="llama3-8b-sfr",
@@ -130,28 +132,28 @@ def load_item(fn:str):
    else:
       return torch_load(fn)
 
-def build_transformer(inst:ModelInst, device) -> Tuple[Transformer, PreTrainedTokenizer]:
+def build_transformer(arch:ModelArchitecture, device) -> Tuple[Transformer, PreTrainedTokenizer]:
    # download weights
    def download(filename:str) -> Path:
-      return fetch(f"{inst.weights_url}/{filename}", filename, subdir=inst.weights_subdir)
-   model_path = download(inst.index_filename)
-   for i in range(1, inst.num_weights+1):
-      download(inst.chunk_filename.format(i=i, num_weights=inst.num_weights))
-   for filename in inst.extra_filenames:
+      return fetch(f"{arch.weights_url}/{filename}", filename, subdir=arch.weights_subdir)
+   model_path = download(arch.index_filename)
+   for i in range(1, arch.num_weights+1):
+      download(arch.chunk_filename.format(i=i, num_weights=arch.num_weights))
+   for filename in arch.extra_filenames:
       download(filename)
 
    # load tokenizer
    tokenizer = AutoTokenizer.from_pretrained(str(model_path.parent))
 
    # build model
-   cfg = inst.config
+   cfg = arch.config
    model = Transformer(cfg)
 
    # load weights
    if model_path.is_dir():
       if (model_path / "model.safetensors.index.json").exists(): weights = load_item(str(model_path / "model.safetensors.index.json"))
       elif (model_path / "model.safetensors").exists(): weights = load_item(str(model_path / "model.safetensors"))
-      else: weights = concat_weights([load_item(str(model_path / f"consolidated.{i:02d}.pth")) for i in range(inst.num_weights)], device[0] if isinstance(device, tuple) else device)
+      else: weights = concat_weights([load_item(str(model_path / f"consolidated.{i:02d}.pth")) for i in range(arch.num_weights)], device[0] if isinstance(device, tuple) else device)
    else:
       weights = load_item(str(model_path))
    if "model.embed_tokens.weight" in weights:
@@ -208,29 +210,28 @@ if __name__ == "__main__":
 
    # Load model
    with Context(BEAM=0):
-      inst = MODELS[args.model]
+      arch = MODELS[args.model]
       device: Union[str,Tuple[str,...]] = tuple(f"{Device.DEFAULT}:{i}" for i in range(args.gpu_offset, args.gpu_offset+args.gpus))
       if len(device) == 1:
          device = device[0]
 
-      model, tokenizer = build_transformer(inst, device) if not args.skip_load else ((lambda a,b,c: 1), PreTrainedTokenizer())
+      model, tokenizer = build_transformer(arch, device) if not args.skip_load else ((lambda a,b,c: 1), PreTrainedTokenizer())
 
    # Prepare promtps and encoding
-   inst.prompt.sub_vars(tokenizer)
+   p = arch.prompt.sub_vars(tokenizer)
+   assert len(p.eos_tokens) > 0
 
-   assert not args.skip_load
-   assert len(inst.prompt.eos_tokens) > 0
-
-   prompt = inst.prompt.system_message.format("You are an helpful assistant.") \
-            + inst.prompt.user_message.format("what is the distance between the earth and the moon?") \
-            + inst.prompt.assistant_prefix
+   prompt = p.system_message.format("You are an helpful assistant.") \
+            + p.user_message.format("what is the distance between the earth and the moon?") \
+            + p.assistant_prefix
    tokens = tokenizer.encode(prompt, add_special_tokens=False)
    count = 0
 
+   assert not args.skip_load
    while True:
       tok = model(tokens, device, SAMPLER)
       tokens.append(tok)
       count += 1
-      if tok in inst.prompt.eos_tokens or count >= MAX_TOKENS: break
+      if tok in p.eos_tokens or count >= MAX_TOKENS: break
       print(tokenizer.decode([tok]), end="", flush=True)
    print(flush=True)
