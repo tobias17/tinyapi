@@ -18,6 +18,7 @@ class Prompt:
    system_message: str
    user_message: str
    assistant_prefix: str
+   assistant_suffix: str
    eos_texts: Tuple[str,...]
    eos_tokens: Set[int] = field(default_factory=lambda: set())
 
@@ -33,6 +34,7 @@ class Prompt:
       self.system_message   = self.__sub_text(self.system_message,   tokenizer)
       self.user_message     = self.__sub_text(self.user_message,     tokenizer)
       self.assistant_prefix = self.__sub_text(self.assistant_prefix, tokenizer)
+      self.assistant_suffix = self.__sub_text(self.assistant_suffix, tokenizer)
 
       for text in self.eos_texts:
          text = self.__sub_text(text, tokenizer)
@@ -86,7 +88,7 @@ MODELS: Dict[str,ModelArchitecture] = {
       num_weights=8,
       chunk_filename="model-{i:05d}-of-{num_weights:06d}.safetensors", # WHY????
       fix_weights=fix_qwen_weights,
-      prompt=Prompt("%%bos_token%%{0}", "<｜User｜>{0}\n", "<｜Assistant｜><think>", ("%%eos_token%%",)),
+      prompt=Prompt("%%bos_token%%{0}", "<｜User｜>{0}\n", "<｜Assistant｜><think>", "%%eos_token%%", ("%%eos_token%%",)),
       permute_layers=False,
    ),
    "Mistral-24B": ModelArchitecture(
@@ -94,7 +96,7 @@ MODELS: Dict[str,ModelArchitecture] = {
       weights_url="https://huggingface.co/mistralai/Mistral-Small-24B-Instruct-2501/resolve/main",
       weights_subdir="mistral_small_24b_instruct",
       num_weights=10,
-      prompt=Prompt("<s>[SYSTEM_PROMPT]{0}[/SYSTEM_PROMPT]", "[INST]{0}[/INST]", "", ("</s>",)),
+      prompt=Prompt("<s>[SYSTEM_PROMPT]{0}[/SYSTEM_PROMPT]", "[INST]{0}[/INST]", "", "</s>", ("</s>",)),
       default_system_prompt="You are an helpful assistant. Keep answers short and direct.",
    ),
    "Llama-8B": ModelArchitecture(
@@ -106,6 +108,7 @@ MODELS: Dict[str,ModelArchitecture] = {
          system_message  ="<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{0}<|eot_id|>",
          user_message    ="<|start_header_id|>user<|end_header_id|>\n\n{0}<|eot_id|>",
          assistant_prefix="<|start_header_id|>assistant<|end_header_id|>\n\n",
+         assistant_suffix="<|eot_id|>",
          eos_texts       =("<|end_of_text|>", "<|eot_id|>"),
       ),
    )
