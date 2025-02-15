@@ -189,7 +189,7 @@ def build_transformer(arch:ModelArchitecture, device) -> Tuple[Transformer, PreT
 
 MAX_TOKENS = 128
 SAMPLER = TokenSampler(
-   temperature=1.3,
+   temperature=0.95,
    top_k=0,
    top_p=0.0,
    alpha_f=0.0,

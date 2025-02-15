@@ -1,6 +1,6 @@
 from tinygrad import Tensor, Device, Context, GlobalCounters
 from transformers import PreTrainedTokenizer
-from bottle import Bottle, request, response, HTTPResponse, abort, static_file
+from bottle import Bottle, request, response, HTTPResponse, abort, static_file, HTTPError
 from typing import Union, Tuple, List, Dict
 from pathlib import Path
 import json, random, time, traceback
@@ -19,7 +19,6 @@ if __name__ == "__main__":
    parser.add_argument("--skip-load", action="store_true")
    args = parser.parse_args()
 
-   Tensor.manual_seed(42)
    Tensor.no_grad = True
 
    # Load model
@@ -45,7 +44,6 @@ if __name__ == "__main__":
             text += p.assistant_prefix + msg["content"] + p.assistant_suffix
          else:
             raise KeyError(f"Got unknown role key '{msg['role']}'")
-      print(f"\nEncoding: |{text}|\n")
       return tokenizer.encode(text, add_special_tokens=False)
 
    SAMPLER = TokenSampler(
@@ -74,10 +72,10 @@ if __name__ == "__main__":
       for key, value in cors_headers.items(): response.set_header(key, value)
 
    @app.error(500)
-   def handle_500_error(error):
+   def handle_500_error(error:HTTPError):
       response.content_type = 'text/plain'
-      print(error)
-      return 'Error 500: Internal Server Error\n\n'
+      print(error.traceback)
+      return f'Error 500: Internal Server Error\n\n{error.traceback}'
 
    root = Path(__file__).parent/"../tinygrad/examples/tinychat"
    @app.route("/<filename>")
@@ -138,26 +136,29 @@ if __name__ == "__main__":
 
    @app.post("/v1/chat/completions")
    def chat_completions():
+      Tensor.manual_seed(time.time())
       rjson = json.loads(request.body.read())
       if "messages" not in rjson: abort(400, "messages required")
 
       # check if we are streaming
-      if rjson.get("stream", False):
+      streaming = rjson.get("stream", False)
+      if streaming:
          response.content_type = "text/event-stream"
          response.set_header("Cache-Control", "no-cache")
-      else: abort(400, "streaming required")
       random_id = random.randbytes(16).hex()
 
       messages = [m for m in rjson["messages"]]
       if messages[0]["role"] != "system":
          messages.insert(0, {"role":"system", "content":arch.default_system_prompt})
       tokens = encode_messages(messages)
+      new_tokens = []
 
       while True:
          GlobalCounters.reset()
          tok = model(tokens, device, SAMPLER)
          tokens.append(tok)
          if tok in p.eos_tokens: break
+         new_tokens.append(tok)
 
          res = {
             "id": random_id,
@@ -173,7 +174,8 @@ if __name__ == "__main__":
                "finish_reason": None,
             }]
          }
-         yield f"data: {json.dumps(res)}\n\n"
+         if streaming:
+            yield f"data: {json.dumps(res)}\n\n"
 
       res = {
          "id": random_id,
@@ -185,7 +187,18 @@ if __name__ == "__main__":
             "delta": {},
             "finish_reason": "stop",
          }]
+      } if streaming else {
+         "id": random_id,
+         "object": "chat.completion",
+         "created": int(time.time()),
+         "choices": [{
+            "index": 0,
+            "message": {
+               "role": "assistant",
+               "content": tokenizer.decode(new_tokens),
+            },
+         }]
       }
       yield f"data: {json.dumps(res)}\n\n"
 
-   app.run(host=args.host, port=args.port, debug=True)
+   app.run(host=args.host, port=args.port, debug=args.debug)
