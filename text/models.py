@@ -10,7 +10,7 @@ from typing import Dict, Tuple, Set, List, Optional, Callable, Union
 from dataclasses import dataclass, field, asdict
 from transformers import AutoTokenizer, PreTrainedTokenizer
 from pathlib import Path
-import re, json, os
+import re, json, os, time
 
 variable_pattern = re.compile(r"%%([^%]+)%%")
 @dataclass
@@ -187,9 +187,9 @@ def build_transformer(arch:ModelArchitecture, device) -> Tuple[Transformer, PreT
    return model, tokenizer
 
 
-MAX_TOKENS = 256
+MAX_TOKENS = 128
 SAMPLER = TokenSampler(
-   temperature=0.95,
+   temperature=1.3,
    top_k=0,
    top_p=0.0,
    alpha_f=0.0,
@@ -205,7 +205,7 @@ if __name__ == "__main__":
    parser.add_argument("--skip-load", action="store_true")
    args = parser.parse_args()
 
-   Tensor.manual_seed(42)
+   # Tensor.manual_seed(42)
    Tensor.no_grad = True
 
    # Load model
@@ -221,24 +221,25 @@ if __name__ == "__main__":
    p = arch.prompt.sub_vars(tokenizer)
    assert len(p.eos_tokens) > 0
 
-   prompt = p.system_message.format(arch.default_system_prompt) \
-            + p.user_message.format("what is the distance between the earth and the moon?") \
-            + p.assistant_prefix
-   tokens = tokenizer.encode(prompt, add_special_tokens=False)
-   count = 0
+   for _ in range(4):
+      prompt = p.system_message.format(arch.default_system_prompt) \
+               + p.user_message.format("what is the distance between the earth and the moon?") \
+               + p.assistant_prefix
+      tokens = tokenizer.encode(prompt, add_special_tokens=False)
+      count = 0
 
-   times = []
-   import time
-   st = time.time()
-   assert not args.skip_load
-   while True:
-      tok = model(tokens, device, SAMPLER)
-      et = time.time()
-      if count > 1: times.append(et - st)
-      st = et
-      tokens.append(tok)
-      count += 1
-      if tok in p.eos_tokens or count >= MAX_TOKENS: break
-      print(tokenizer.decode([tok]), end="", flush=True)
-   print(flush=True)
-   print(f"\nTokens per second: {len(times) / sum(times):.2f}")
+      times = []
+      import time
+      st = time.time()
+      assert not args.skip_load
+      while True:
+         tok = model(tokens, device, SAMPLER)
+         et = time.time()
+         if count > 1: times.append(et - st)
+         st = et
+         tokens.append(tok)
+         count += 1
+         if tok in p.eos_tokens or count >= MAX_TOKENS: break
+         print(tokenizer.decode([tok]), end="", flush=True)
+      print(flush=True)
+      print(f"\nTokens per second: {len(times) / sum(times):.2f}\n")
