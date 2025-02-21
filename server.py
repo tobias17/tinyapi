@@ -1,5 +1,5 @@
 from tinygrad import Tensor, Device
-from bottle import Bottle, request, response, HTTPResponse, HTTPError
+from bottle import Bottle, request, response, HTTPResponse, HTTPError # type: ignore
 from typing import Optional
 
 from text.models import MODELS as TEXT_MODELS
@@ -42,7 +42,7 @@ if __name__ == "__main__":
    import argparse
    parser = argparse.ArgumentParser("ModelTest", description="Performs a test load and generation of the specified model")
    parser.add_argument('--text-model',  choices=list(TEXT_MODELS.keys()), help="Which text model to load and serve")
-   parser.add_argument('--image-model')
+   parser.add_argument('--image-model', choices=["SDXL"], help="Which image model to load and serve")
    parser.add_argument('--host', type=str, default="0.0.0.0", help="Web server bind address")
    parser.add_argument('--port', type=int, default=7776, help="Web server port")
    args = parser.parse_args()

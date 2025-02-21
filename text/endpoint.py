@@ -1,10 +1,9 @@
-from tinygrad import Tensor, Device, Context, GlobalCounters
-from transformers import PreTrainedTokenizer
+from tinygrad import Tensor, Context, GlobalCounters
 from pathlib import Path
 from typing import Tuple, List, Dict
 import json, random, time
 
-from bottle import Bottle, request, response, abort, static_file
+from bottle import Bottle, request, response, abort, static_file # type: ignore
 from text.models import MODELS, TokenSampler, build_transformer
 
 
