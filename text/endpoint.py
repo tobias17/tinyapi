@@ -6,9 +6,9 @@ import json, random, time
 from bottle import Bottle, request, response, abort, static_file # type: ignore
 from text.models import MODELS, TokenSampler, build_transformer
 
+BEAM_VALUE = 20
 
 MAX_NEW_TOKENS = 512
-
 
 def add_text_endpoints(app:Bottle, model_name:str, device:Tuple[str,...]) -> None:
    # Load model
@@ -41,7 +41,8 @@ def add_text_endpoints(app:Bottle, model_name:str, device:Tuple[str,...]) -> Non
    )
    tokens = tokenizer.encode(p.system_message.format(arch.default_system_prompt), add_special_tokens=False)
    print("Warming up text model")
-   model(tokens, device, SAMPLER)
+   with Context(BEAM=BEAM_VALUE):
+      model(tokens, device, SAMPLER)
 
 
    root = Path(__file__).parent/"../tinygrad/examples/tinychat"
@@ -92,6 +93,8 @@ def add_text_endpoints(app:Bottle, model_name:str, device:Tuple[str,...]) -> Non
       tokens = encode_messages(messages)
       new_tokens = []
 
+      s_time = time.time()
+      ft_start = s_time
       count = 0
       while True:
          count += 1
@@ -100,7 +103,10 @@ def add_text_endpoints(app:Bottle, model_name:str, device:Tuple[str,...]) -> Non
             break
 
          GlobalCounters.reset()
-         tok = model(tokens, device, SAMPLER)
+         with Context(BEAM=BEAM_VALUE):
+            tok = model(tokens, device, SAMPLER)
+         if count == 1:
+            ttft = time.time() - ft_start
          tokens.append(tok)
          if tok in p.eos_tokens: break
          new_tokens.append(tok)
@@ -144,4 +150,7 @@ def add_text_endpoints(app:Bottle, model_name:str, device:Tuple[str,...]) -> Non
             },
          }]
       }
+      d_time = time.time() - s_time
+      tps = (len(new_tokens) - 1) / (d_time - ttft)
+      print(f"Generated {len(new_tokens)} tokens, {tps:.1f} tps, {ttft:.1f} sec ttft")
       yield f"data: {json.dumps(res)}\n\n"

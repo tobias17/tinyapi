@@ -27,6 +27,10 @@ def load_sdxl(device:Union[str,Tuple[str,...]], guidance_scale:float=Defaults.GU
    return model, DPMPP2MSampler(guidance_scale)
 
 @TinyJit
+def make_noise_image(shape:Tuple[int,...]) -> Tensor:
+   return Tensor.randn(shape).realize()
+
+@TinyJit
 def decode_step(model:SDXL, z:Tensor) -> Tensor:
    return model.decode(z).realize()
 
@@ -43,7 +47,10 @@ def generate_image(model:SDXL, sampler:DPMPP2MSampler, prompt:str, img_width:int
    for v in uc.values(): v.realize()
 
    shape = (N, C, img_height // F, img_width // F)
-   randn = Tensor.randn(shape)
+   if warmup_decoder:
+      for _ in range(2):
+         make_noise_image(shape)
+   randn = make_noise_image(shape)
 
    z = sampler(model.denoise, randn, c, uc, num_steps)
    if warmup_decoder:

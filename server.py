@@ -4,6 +4,7 @@ from typing import Optional
 
 from text.models import MODELS as TEXT_MODELS
 from text.endpoint import add_text_endpoints
+from image.endpoint import add_image_endpoints
 
 def run_server(host:str, port:int, text_model:Optional[str], image_model:Optional[str]) -> None:
    assert any(m is not None for m in (text_model, image_model)), f"Got no models to load"
@@ -34,7 +35,7 @@ def run_server(host:str, port:int, text_model:Optional[str], image_model:Optiona
 
    if image_model is not None:
       # TODO: make device assignment better
-      pass
+      add_image_endpoints(app, image_model, Device.DEFAULT)
 
    app.run(host=host, port=port, debug=True)
 
