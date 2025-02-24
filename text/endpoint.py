@@ -6,7 +6,7 @@ import json, random, time
 from bottle import Bottle, request, response, abort, static_file # type: ignore
 from text.models import MODELS, TokenSampler, build_transformer
 
-BEAM_VALUE = 20
+BEAM_VALUE = 1
 
 MAX_NEW_TOKENS = 512
 
@@ -43,6 +43,7 @@ def add_text_endpoints(app:Bottle, model_name:str, device:Tuple[str,...]) -> Non
    print("Warming up text model")
    with Context(BEAM=BEAM_VALUE):
       model(tokens, device, SAMPLER)
+   print()
 
 
    root = Path(__file__).parent/"../tinygrad/examples/tinychat"

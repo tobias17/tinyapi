@@ -7,7 +7,7 @@ import json, base64, time
 from bottle import Bottle, request, response, abort, static_file # type: ignore
 from image.models import load_sdxl, generate_image
 
-BEAM_VALUE = 20
+BEAM_VALUE = 1
 
 DEFAULT_IMAGE_FILETYPE = "JPEG"
 
