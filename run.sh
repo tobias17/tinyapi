@@ -1,1 +1,2 @@
-python ./server.py --host 192.168.1.200 --image-model SDXL --text-model Mistral-24B
+git submodule update --init
+PYTHONPATH=./tinygrad python ./server.py configs/tinybox.json

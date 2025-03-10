@@ -1,5 +1,5 @@
-from tinygrad import Context
-from typing import Tuple, Union
+from tinygrad import Context, Device
+from typing import Tuple, Union, Dict
 from io import BytesIO
 from PIL import Image
 import json, base64, time
@@ -16,7 +16,17 @@ def base64_encode(im:Image.Image) -> str:
    im.save(buffered, format=DEFAULT_IMAGE_FILETYPE)
    return base64.b64encode(buffered.getvalue()).decode()
 
-def add_image_endpoints(app:Bottle, model_name:str, device:Union[str,Tuple[str,...]]) -> None:
+def add_image_endpoints(app:Bottle, cfg:Dict) -> None:
+   # Extract the config
+   device_idx = cfg.get("device", None)
+   device: Union[str,Tuple[str,...]]
+   if isinstance(device_idx, int):
+      device = f"{Device.DEFAULT}:{device_idx}"
+   elif isinstance(device_idx, (tuple,list)):
+      device = tuple(f"{Device.DEFAULT}:{i}" for i in device_idx)
+   else:
+      raise ValueError(f"Got unsupported type {type(device).__name__} for device ({device_idx})")
+   
    # Load model
    with Context(BEAM=0):
       model, sampler = load_sdxl(device)

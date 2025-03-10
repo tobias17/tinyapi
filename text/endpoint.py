@@ -1,6 +1,6 @@
-from tinygrad import Tensor, Context, GlobalCounters
+from tinygrad import Tensor, Context, GlobalCounters, Device
+from typing import Tuple, List, Dict, Union
 from pathlib import Path
-from typing import Tuple, List, Dict
 import json, random, time
 
 from bottle import Bottle, request, response, abort, static_file # type: ignore
@@ -10,7 +10,19 @@ BEAM_VALUE = 1
 
 MAX_NEW_TOKENS = 512
 
-def add_text_endpoints(app:Bottle, model_name:str, device:Tuple[str,...]) -> None:
+def add_text_endpoints(app:Bottle, cfg:Dict) -> None:
+   # Extract the config
+   model_name = cfg.get("model", None)
+   assert model_name is not None, f"text config did not have a model entry"
+   device_idx = cfg.get("device", None)
+   device: Union[str,Tuple[str,...]]
+   if isinstance(device_idx, int):
+      device = f"{Device.DEFAULT}:{device_idx}"
+   elif isinstance(device_idx, (tuple,list)):
+      device = tuple(f"{Device.DEFAULT}:{i}" for i in device_idx)
+   else:
+      raise ValueError(f"Got unsupported type {type(device).__name__} for device ({device_idx})")
+
    # Load model
    with Context(BEAM=0):
       arch = MODELS[model_name]

@@ -1,13 +1,13 @@
-from tinygrad import Tensor, Device
+from tinygrad import Tensor
 from bottle import Bottle, request, response, HTTPResponse, HTTPError # type: ignore
-from typing import Optional
+from typing import Dict
+import json, os
 
 from text.models import MODELS as TEXT_MODELS
 from text.endpoint import add_text_endpoints
 from image.endpoint import add_image_endpoints
 
-def run_server(host:str, port:int, text_model:Optional[str], image_model:Optional[str]) -> None:
-   assert any(m is not None for m in (text_model, image_model)), f"Got no models to load"
+def run_server(host:str, port:int, text_cfg:Dict, image_cfg:Dict) -> None:
    Tensor.no_grad = True
 
    app = Bottle()
@@ -29,23 +29,27 @@ def run_server(host:str, port:int, text_model:Optional[str], image_model:Optiona
       print(error.traceback)
       return f'Error 500: Internal Server Error\n\n{error.traceback}'
 
-   if text_model is not None:
-      # TODO: make device assignment better
-      add_text_endpoints(app, text_model, tuple(f"{Device.DEFAULT}:{i}" for i in range(1,5)))
+   if text_cfg.get("enabled", True):
+      add_text_endpoints(app, text_cfg)
 
-   if image_model is not None:
-      # TODO: make device assignment better
-      add_image_endpoints(app, image_model, Device.DEFAULT)
+   if image_cfg.get("enabled", True):
+      add_image_endpoints(app, image_cfg)
 
    app.run(host=host, port=port, debug=True)
 
 if __name__ == "__main__":
    import argparse
    parser = argparse.ArgumentParser("ModelTest", description="Performs a test load and generation of the specified model")
-   parser.add_argument('--text-model',  choices=list(TEXT_MODELS.keys()), help="Which text model to load and serve")
-   parser.add_argument('--image-model', choices=["SDXL"], help="Which image model to load and serve")
-   parser.add_argument('--host', type=str, default="0.0.0.0", help="Web server bind address")
-   parser.add_argument('--port', type=int, default=7776, help="Web server port")
+   parser.add_argument('config_file', type=str, help="Path to json file containing the server config")
    args = parser.parse_args()
 
-   run_server(args.host, args.port, args.text_model, args.image_model)
+   assert os.path.exists(args.config_file), f"Could not find config file, searched for {os.path.abspath(args.config_file)}"
+   with open(args.config_file) as f:
+      cfg = json.load(f)
+   
+   host  = cfg.get("host", "0.0.0.0")
+   port  = cfg.get("port", 7776)
+   text  = cfg.get("text",  {"enabled":False})
+   image = cfg.get("image", {"enabled":False})
+
+   run_server(host, port, text, image)

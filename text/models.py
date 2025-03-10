@@ -7,7 +7,7 @@ from examples.llama3 import load
 from extra.models.llama import Transformer, ModelConfig, convert_from_huggingface, fix_bf16, TokenSampler
 
 from typing import Dict, Tuple, Set, List, Optional, Callable, Union
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from transformers import AutoTokenizer, PreTrainedTokenizer
 from pathlib import Path
 import re, json, os, time
