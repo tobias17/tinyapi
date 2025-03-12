@@ -12,8 +12,7 @@ class Defaults:
    GUIDANCE = 7.0
    STEPS    = 20
 
-# MODEL_NAME, MODEL_URL = 'sd_xl_base_1.0.safetensors', 'https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors', 
-MODEL_NAME, MODEL_URL = 'juggernaut_xl.safetensors', 'https://civitai.com/api/download/models/782002?type=Model&format=SafeTensor&size=full&fp=fp16'
+MODEL_NAME, MODEL_URL = 'juggernaut_xl.safetensors', 'https://huggingface.co/RunDiffusion/Juggernaut-XL-v9/resolve/main/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors'
 
 def remap_lora_weight_name(name:str) -> str:
    name = re.sub(r'_', '.', name)
@@ -28,7 +27,7 @@ def remap_lora_weight_name(name:str) -> str:
 
 def load_lora_onto_(model:SDXL) -> None:
    model_state_dict = get_state_dict(model)
-   lora_state_dict  = safe_load(fetch("https://civitai.com/api/download/models/130580?type=Model&format=SafeTensor", "pixel-art-xl.safetensors"))
+   lora_state_dict  = safe_load(fetch("https://huggingface.co/nerijs/pixel-art-xl/resolve/main/pixel-art-xl.safetensors", "pixel-art-xl.safetensors"))
 
    remapped_state_dict = {}
    for k, w in lora_state_dict.items():
@@ -63,8 +62,7 @@ def load_lora_onto_(model:SDXL) -> None:
 
 def load_sdxl(device:Union[str,Tuple[str,...]], guidance_scale:float=Defaults.GUIDANCE) -> Tuple[SDXL,DPMPP2MSampler]:
    model = SDXL(configs["SDXL_Base"])
-   default_weight_url = MODEL_URL
-   weights = fetch(default_weight_url, MODEL_NAME)
+   weights = fetch(MODEL_URL, MODEL_NAME)
 
    with Context(BEAM=0):
       assert isinstance(device, str), f"Multi device image generation not yet supported"

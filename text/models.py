@@ -1,14 +1,12 @@
 from tinygrad import Tensor, Device, dtypes, nn, Context
-from tinygrad.helpers import fetch, colored, GlobalCounters, Timing, DEBUG, tqdm
-from tinygrad.nn.state import get_state_dict, load_state_dict, get_parameters
-from tinygrad.nn.state import safe_load, torch_load, load_state_dict, get_parameters, gguf_load
-from examples.llama3 import load
+from tinygrad.helpers import fetch
+from tinygrad.nn.state import safe_load, torch_load, load_state_dict, gguf_load
 
 from extra.models.llama import Transformer, ModelConfig, convert_from_huggingface, fix_bf16, TokenSampler
 
 from typing import Dict, Tuple, Set, List, Optional, Callable, Union
 from dataclasses import dataclass, field
-from transformers import AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer # type: ignore
 from pathlib import Path
 import re, json, os, time
 
@@ -93,7 +91,7 @@ MODELS: Dict[str,ModelArchitecture] = {
    ),
    "Mistral-24B": ModelArchitecture(
       config=ModelConfig(dim=5120, hidden_dim=32768, n_layers=40, n_heads=32, head_dim=128, n_kv_heads=8, norm_eps=1e-5, vocab_size=131072, rope_theta=100000000.0, max_context=32768),
-      weights_url="https://huggingface.co/mistralai/Mistral-Small-24B-Instruct-2501/resolve/main",
+      weights_url="https://huggingface.co/unsloth/Mistral-Small-24B-Instruct-2501/resolve/2eddef095b2d91c22c59cc3ede00ec595e530d16", # really Mistral? a gated "OSS" model???
       weights_subdir="mistral_small_24b_instruct",
       num_weights=10,
       prompt=Prompt("<s>[SYSTEM_PROMPT]{0}[/SYSTEM_PROMPT]", "[INST]{0}[/INST]", "", "</s>", ("</s>",)),

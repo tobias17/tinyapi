@@ -1,12 +1,13 @@
 {
-   "host": "192.168.1.200",
-   "image": {
-      "enabled": true,
-      "device": 0
-   },
+   "host": "0.0.0.0",
+   "port": 7776,
    "text": {
       "enabled": true,
       "model": "Mistral-24B",
       "device": [1, 2, 3, 4]
+   },
+   "image": {
+      "enabled": true,
+      "device": 0
    }
 }
