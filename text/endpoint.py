@@ -106,14 +106,16 @@ def add_text_endpoints(app:Bottle, cfg:Dict) -> None:
       tokens = encode_messages(messages)
       new_tokens = []
 
+      max_new_tokens = rjson.get("max_new_tokens", MAX_NEW_TOKENS)
+
       s_time = time.time()
       ft_start = s_time
       count = 0
       while True:
-         count += 1
-         if count >= MAX_NEW_TOKENS:
-            new_tokens.append(tokenizer.encode(p.assistant_suffix, add_special_tokens=False))
+         if count >= max_new_tokens:
+            new_tokens += tokenizer.encode(p.assistant_suffix, add_special_tokens=False)
             break
+         count += 1
 
          GlobalCounters.reset()
          with Context(BEAM=BEAM_VALUE):
