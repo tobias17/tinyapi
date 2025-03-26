@@ -54,11 +54,12 @@ class ModelArchitecture:
    index_filename: str = "model.safetensors.index.json"
    chunk_filename: str = "model-{i:05d}-of-{num_weights:05d}.safetensors"
    extra_filenames: List[str] = field(default_factory=lambda: ["tokenizer.json", "tokenizer_config.json"])
-   fix_weights: Callable[[Transformer,ModelConfig],Transformer] = (lambda m,c: m)
+   fix_model: Callable[[Transformer,ModelConfig],Transformer] = (lambda m,_: m)
+   fix_weights: Callable[[Dict[str,Tensor],ModelConfig],Dict[str,Tensor]] = (lambda s,_: s)
    permute_layers: bool = True
 
 
-def fix_qwen_weights(model:Transformer, cfg:ModelConfig) -> Transformer:
+def fix_qwen_model(model:Transformer, cfg:ModelConfig) -> Transformer:
    assert cfg.n_kv_heads is not None
    updated_layers = []
    for layer in model.layers:
@@ -69,6 +70,12 @@ def fix_qwen_weights(model:Transformer, cfg:ModelConfig) -> Transformer:
       updated_layers.append(layer)
    model.layers = updated_layers
    return model
+
+
+def fix_hermes_weights(state_dict:Dict[str,Tensor], cfg:ModelConfig) -> Dict[str,Tensor]:
+   for key in ["tok_embeddings.weight", "output.weight"]:
+      state_dict[key] = state_dict[key].to(Device.DEFAULT).pad(((0,2),None)).realize()
+   return state_dict
 
 
 TARGET_DTYPE = dtypes.float16
@@ -85,7 +92,7 @@ MODELS: Dict[str,ModelArchitecture] = {
       weights_subdir="deepseek_r1_qwen_32b",
       num_weights=8,
       chunk_filename="model-{i:05d}-of-{num_weights:06d}.safetensors", # WHY????
-      fix_weights=fix_qwen_weights,
+      fix_model=fix_qwen_model,
       prompt=Prompt("%%bos_token%%{0}", "<｜User｜>{0}\n", "<｜Assistant｜><think>", "%%eos_token%%", ("%%eos_token%%",)),
       permute_layers=False,
    ),
@@ -95,6 +102,15 @@ MODELS: Dict[str,ModelArchitecture] = {
       weights_subdir="mistral_small_24b_instruct",
       num_weights=10,
       prompt=Prompt("<s>[SYSTEM_PROMPT]{0}[/SYSTEM_PROMPT]", "[INST]{0}[/INST]", "", "</s>", ("</s>",)),
+      default_system_prompt="You are an helpful assistant. Keep answers short and direct.",
+   ),
+   "DeepHermes3-24B": ModelArchitecture(
+      config=ModelConfig(dim=5120, hidden_dim=32768, n_layers=40, n_heads=32, head_dim=128, n_kv_heads=8, norm_eps=1e-5, vocab_size=131080, rope_theta=100000000.0, max_context=32768),
+      weights_url="https://huggingface.co/NousResearch/DeepHermes-3-Mistral-24B-Preview/resolve/main",
+      weights_subdir="deephermes3_24b",
+      num_weights=10,
+      fix_weights=fix_hermes_weights,
+      prompt=Prompt("<s>[SYSTEM_PROMPT]{0}[/SYSTEM_PROMPT]<|eot_id|>", "[INST]{0}[/INST]<|eot_id|>", "", "<|eot_id|>", ("</s>","<|eot_id|>")),
       default_system_prompt="You are an helpful assistant. Keep answers short and direct.",
    ),
    "Llama-8B": ModelArchitecture(
@@ -151,7 +167,7 @@ def build_transformer(arch:ModelArchitecture, device) -> Tuple[Transformer, PreT
 
    # build model
    cfg = arch.config
-   model = arch.fix_weights(Transformer(cfg), cfg)
+   model = arch.fix_model(Transformer(cfg), cfg)
 
    # load weights
    if model_path.is_dir():
@@ -164,6 +180,8 @@ def build_transformer(arch:ModelArchitecture, device) -> Tuple[Transformer, PreT
       assert cfg.n_kv_heads is not None
       weights = convert_from_huggingface(weights, model, cfg.n_heads, cfg.n_kv_heads, permute_layers=arch.permute_layers)
    weights = fix_bf16(weights)
+
+   weights = arch.fix_weights(weights, cfg)
 
    with Context(BEAM=0):
       # shard
@@ -187,7 +205,7 @@ def build_transformer(arch:ModelArchitecture, device) -> Tuple[Transformer, PreT
 
 MAX_TOKENS = 128
 SAMPLER = TokenSampler(
-   temperature=0.95,
+   temperature=0.7,
    top_k=0,
    top_p=0.0,
    alpha_f=0.0,
@@ -219,25 +237,25 @@ if __name__ == "__main__":
    p = arch.prompt.sub_vars(tokenizer)
    assert len(p.eos_tokens) > 0
 
-   for _ in range(4):
-      prompt = p.system_message.format(arch.default_system_prompt) \
-               + p.user_message.format("what is the distance between the earth and the moon?") \
-               + p.assistant_prefix
-      tokens = tokenizer.encode(prompt, add_special_tokens=False)
-      count = 0
+   prompt = p.system_message.format(arch.default_system_prompt) \
+            + p.user_message.format("what is the distance between the earth and the moon?") \
+            + p.assistant_prefix
+   print(prompt)
+   tokens = tokenizer.encode(prompt, add_special_tokens=False)
+   count = 0
 
-      times = []
-      import time
-      st = time.time()
-      assert not args.skip_load
-      while True:
-         tok = model(tokens, device, SAMPLER)
-         et = time.time()
-         if count > 1: times.append(et - st)
-         st = et
-         tokens.append(tok)
-         count += 1
-         if tok in p.eos_tokens or count >= MAX_TOKENS: break
-         print(tokenizer.decode([tok]), end="", flush=True)
-      print(flush=True)
-      print(f"\nTokens per second: {len(times) / sum(times):.2f}\n")
+   times = []
+   import time
+   st = time.time()
+   assert not args.skip_load
+   while True:
+      tok = model(tokens, device, SAMPLER)
+      et = time.time()
+      if count > 1: times.append(et - st)
+      st = et
+      tokens.append(tok)
+      count += 1
+      if tok in p.eos_tokens or count >= MAX_TOKENS: break
+      print(tokenizer.decode([tok]), end="", flush=True)
+   print(flush=True)
+   print(f"\nTokens per second: {len(times) / sum(times):.2f}\n")
